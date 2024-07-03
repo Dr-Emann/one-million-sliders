@@ -1,23 +1,24 @@
+mod comm;
 mod shared_bitmap;
 
+use std::convert::Infallible;
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::{sse, Sse};
 use axum::routing::get;
-use axum::Router;
+use axum::{BoxError, Router};
+use futures::{Stream, stream};
 use std::net::Ipv6Addr;
 use std::sync::Arc;
-use axum::extract::{Query, State};
-use axum::http::StatusCode;
-use croaring::Bitmap64;
-use crate::shared_bitmap::ToggleOp;
 
 #[tokio::main]
 async fn main() {
-    let app = Router::new().route("/updates", get(range_updates));
+    let app = Router::new().route("/1k-updates/:i", get(range_updates));
 
     let listener = tokio::net::TcpListener::bind((Ipv6Addr::UNSPECIFIED, 8000))
         .await
         .unwrap();
 
-    let (write, read) = left_right::new::<Bitmap64, ToggleOp>();
     axum::serve(listener, app).await.unwrap()
 }
 
@@ -28,15 +29,22 @@ struct Range {
 }
 
 #[axum::debug_handler]
-async fn range_updates(State(state): State<Arc<BitmapState>>, Query(range): Query<Range>) -> axum::response::Result<()> {
-    if range.start > range.end {
-        return Err((StatusCode::BAD_REQUEST, "start must be less than end").into());
+async fn range_updates(
+    Path(i): Path<u32>,
+) -> axum::response::Result<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
+    if i > 1000 {
+        return Err(StatusCode::NOT_FOUND.into());
     }
-    println!("start: {}, end: {}", range.start, range.end);
-    Ok(())
-}
 
-pub struct BitmapState {
-    writes: tokio::sync::mpsc::Sender<u64>,
-    bitmap: left_right::ReadHandle<Bitmap64>,
+    let stream = stream::try_unfold(0, |mut last| async move {
+        last += 1;
+
+        if last > 100 {
+            return Ok(None);
+        }
+
+        Ok(Some((sse::Event::default().json_data(last).unwrap(), last)))
+    });
+
+    Ok(Sse::new(stream))
 }

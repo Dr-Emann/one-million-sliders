@@ -1,66 +1,47 @@
 use dashmap::DashMap;
-use std::mem;
+use tokio::sync::watch;
 
-const SEGMENT_LENGTH: usize = u16::MAX as usize + 1;
-const BITMAP_BYTES: usize = SEGMENT_LENGTH / 8;
+pub const MAX_BIT_IDX: u64 = (u32::MAX as u64) * CHUNK_SIZE as u64;
 
-const LIST_BITMAP_THRESHOLD: usize = BITMAP_BYTES / mem::size_of::<u16>();
+pub const CHUNK_SIZE: usize = 512;
+pub const CHUNK_BYTES: usize = (CHUNK_SIZE + 7) / 8;
 
-const _: () = assert!(LIST_BITMAP_THRESHOLD <= 4096);
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct Chunk(pub [u8; CHUNK_BYTES]);
 
-enum Segment {
-    List(Vec<u16>),
-    Bitmap(Box<[u8; BITMAP_BYTES]>),
+impl Default for Chunk {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-impl Segment {
-    fn get(&self, index: u16) -> bool {
-        match self {
-            Segment::List(list) => list.contains(&index),
-            Segment::Bitmap(bitmap) => {
-                let byte_index = index as usize / 8;
-                let bit_index = index as usize % 8;
-                bitmap[byte_index] & (1 << bit_index) != 0
-            }
-        }
+impl Chunk {
+    pub const fn new() -> Self {
+        Self([0; CHUNK_BYTES])
     }
-    
-    fn toggle(&mut self, index: u16) {
-        match self {
-            Segment::List(list) => {
-                match list.binary_search(&index) {
-                    Ok(i) => {
-                        list.remove(i);
-                    }
-                    Err(i) => {
-                        if list.len() < LIST_BITMAP_THRESHOLD {
-                            list.insert(i, index);
-                        } else {
-                            let mut bitmap = Box::new([0; BITMAP_BYTES]);
-                            for &mut i in list {
-                                let byte_index = i as usize / 8;
-                                let bit_index = i as usize % 8;
-                                bitmap[byte_index] |= 1 << bit_index;
-                            }
-                            let byte_index = index as usize / 8;
-                            let bit_index = index as usize % 8;
-                            bitmap[byte_index] |= 1 << bit_index;
-                            *self = Segment::Bitmap(bitmap);
-                        }
-                    }
-                }
-            }
-            Segment::Bitmap(bitmap) => {
-                let byte_index = index as usize / 8;
-                let bit_index = index as usize % 8;
-                bitmap[byte_index] ^= 1 << bit_index;
-            }
-        }
+
+    pub fn get(&self, index: u16) -> bool {
+        let (byte_index, mask) = Self::index_mask(index);
+        let byte = self.0[byte_index];
+        (byte & mask) != 0
+    }
+
+    pub fn toggle(&mut self, index: u16) {
+        let (byte_index, mask) = Self::index_mask(index);
+        let byte = &mut self.0[byte_index];
+        *byte ^= mask;
+    }
+
+    #[inline]
+    const fn index_mask(index: u16) -> (usize, u8) {
+        let byte_index = index / 8;
+        let bit_index = index % 8;
+        (byte_index as usize, 1 << bit_index)
     }
 }
 
 pub struct SharedBitmap {
-    segments: DashMap<u32, Segment>,
+    segments: DashMap<u32, watch::Sender<Chunk>>,
 }
 
 impl SharedBitmap {
@@ -69,19 +50,22 @@ impl SharedBitmap {
         let Some(segment) = self.segments.get(&segment_index) else {
             return false;
         };
-        segment.value().get(inner_index)
+        let chunk = segment.value().borrow();
+        chunk.get(inner_index)
     }
 
     pub fn toggle(&self, index: u64) {
         let (segment_index, inner_index) = split_idx(index);
-        let mut segment = self.segments.entry(segment_index).or_insert_with(|| Segment::List(Vec::new()));
-        segment.value_mut().toggle(inner_index)
+        let mut segment = self.segments.entry(segment_index).or_insert_with(|| watch::Sender::new(Chunk::new()));
+        segment.value_mut().send_modify(|chunk| {
+            chunk.toggle(inner_index)
+        })
     }
 }
 
 const fn split_idx(index: u64) -> (u32, u16) {
-    assert!(index < 0x1_0000_0000_0000, "only 48 bit indexes");
-    let segment_index = (index / SEGMENT_LENGTH as u64) as u32;
-    let inner_index = (index % SEGMENT_LENGTH as u64) as u16;
+    assert!(index < MAX_BIT_IDX);
+    let segment_index = (index / CHUNK_SIZE as u64) as u32;
+    let inner_index = (index % CHUNK_SIZE as u64) as u16;
     (segment_index, inner_index)
 }
