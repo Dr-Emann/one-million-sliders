@@ -105,7 +105,7 @@ function makeRow(n) {
     row.className = 'cb-row';
     for (let i = 0; i < numCols; i++) {
         let bitIdx = n * numCols + i;
-        if (bitIdx > NUM_VALUES) {
+        if (bitIdx >= NUM_VALUES) {
             break;
         }
         const cb = makeCb(getBit(bitIdx));
