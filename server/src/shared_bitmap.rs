@@ -1,5 +1,6 @@
+use std::sync::Arc;
 use dashmap::DashMap;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 pub const MAX_BIT_IDX: u64 = (u32::MAX as u64) * CHUNK_SIZE as u64;
 
@@ -41,7 +42,7 @@ impl Chunk {
 }
 
 pub struct SharedBitmap {
-    segments: DashMap<u32, watch::Sender<Chunk>>,
+    segments: DashMap<u32, (Arc<Notify>, Chunk)>,
 }
 
 impl SharedBitmap {
@@ -50,16 +51,16 @@ impl SharedBitmap {
         let Some(segment) = self.segments.get(&segment_index) else {
             return false;
         };
-        let chunk = segment.value().borrow();
+        let chunk = &segment.value().1;
         chunk.get(inner_index)
     }
 
     pub fn toggle(&self, index: u64) {
         let (segment_index, inner_index) = split_idx(index);
-        let mut segment = self.segments.entry(segment_index).or_insert_with(|| watch::Sender::new(Chunk::new()));
-        segment.value_mut().send_modify(|chunk| {
-            chunk.toggle(inner_index)
-        })
+        let mut segment = self.segments.entry(segment_index).or_default();
+        let (notify, chunk) = segment.value_mut();
+        chunk.toggle(inner_index);
+        notify.notify_waiters();
     }
 }
 
