@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use dashmap::DashMap;
-use tokio::sync::{Notify, watch};
+use std::sync::Arc;
+use tokio::sync::{watch, Notify};
 
 pub const MAX_BIT_IDX: u64 = (u32::MAX as u64) * CHUNK_SIZE as u64;
 
@@ -41,26 +41,73 @@ impl Chunk {
     }
 }
 
+struct Segment {
+    chunk: Chunk,
+    changed: Arc<Notify>,
+    watch: watch::Receiver<Chunk>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Clone, Default)]
 pub struct SharedBitmap {
-    segments: DashMap<u32, (Arc<Notify>, Chunk)>,
+    segments: Arc<DashMap<u32, Segment>>,
 }
 
 impl SharedBitmap {
-    pub fn get(&self, index: u64) -> bool {
-        let (segment_index, inner_index) = split_idx(index);
-        let Some(segment) = self.segments.get(&segment_index) else {
-            return false;
-        };
-        let chunk = &segment.value().1;
-        chunk.get(inner_index)
+    pub fn new() -> Self {
+        Self::default()
     }
-
     pub fn toggle(&self, index: u64) {
         let (segment_index, inner_index) = split_idx(index);
-        let mut segment = self.segments.entry(segment_index).or_default();
-        let (notify, chunk) = segment.value_mut();
-        chunk.toggle(inner_index);
-        notify.notify_waiters();
+        let mut segment = self.segments.entry(segment_index).or_insert_with(|| {
+            Self::new_segment(Arc::clone(&self.segments), segment_index)
+        });
+
+        segment.chunk.toggle(inner_index);
+        segment.changed.notify_one()
+    }
+
+    pub fn watch(&self, segment_index: u32) -> watch::Receiver<Chunk> {
+        let segment = self.segments.entry(segment_index).or_insert_with(|| {
+            Self::new_segment(Arc::clone(&self.segments), segment_index)
+        });
+        segment.watch.clone()
+    }
+
+    fn new_segment(segments: Arc<DashMap<u32, Segment>>, segment_index: u32) -> Segment {
+        let chunk = Chunk::new();
+        let (tx, rx) = watch::channel(chunk);
+        let notify = Arc::new(Notify::new());
+        let task = {
+            let notify = Arc::clone(&notify);
+            tokio::spawn(async move {
+                loop {
+                    notify.notified().await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                    let Some(segment) = segments.get(&segment_index) else {
+                        break;
+                    };
+                    let segment = segment.value();
+                    tx.send_if_modified(
+                        |chunk| {
+                            if *chunk == segment.chunk {
+                                false
+                            } else {
+                                *chunk = segment.chunk;
+                                true
+                            }
+                        },
+                    );
+                }
+            })
+        };
+        Segment {
+            chunk,
+            changed: notify,
+            watch: rx,
+            task,
+        }
+
     }
 }
 
