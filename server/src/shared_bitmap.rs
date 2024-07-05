@@ -1,11 +1,10 @@
 use dashmap::DashMap;
-use std::sync::Arc;
-use tokio::sync::{watch, Notify};
-
-pub const MAX_BIT_IDX: u64 = (u32::MAX as u64) * CHUNK_SIZE as u64;
+use std::sync::atomic::AtomicU64;
+use tokio::sync::watch;
 
 pub const CHUNK_SIZE: usize = 512;
 pub const CHUNK_BYTES: usize = (CHUNK_SIZE + 7) / 8;
+pub const MAX_BIT_IDX: u64 = (u32::MAX as u64) * CHUNK_SIZE as u64;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct Chunk(pub [u8; CHUNK_BYTES]);
@@ -21,20 +20,30 @@ impl Chunk {
         Self([0; CHUNK_BYTES])
     }
 
-    pub fn get(&self, index: u16) -> bool {
-        let (byte_index, mask) = Self::index_mask(index);
-        let byte = self.0[byte_index];
-        (byte & mask) != 0
-    }
-
-    pub fn toggle(&mut self, index: u16) {
+    // Returns if the byte was added
+    pub fn toggle(&mut self, index: u16) -> bool {
         let (byte_index, mask) = Self::index_mask(index);
         let byte = &mut self.0[byte_index];
         *byte ^= mask;
+        (*byte & mask) != 0
+    }
+
+    // Returns the difference in the number of set bits
+    pub fn toggle_all(&mut self, rhs: Self) -> i16 {
+        const _: () = assert!((CHUNK_SIZE as u64) < u16::MAX as u64);
+        let mut diff = 0;
+        for (lhs, &rhs) in self.0.iter_mut().zip(rhs.0.iter()) {
+            let new_val = *lhs ^ rhs;
+            diff += new_val.count_ones() as i16 - lhs.count_ones() as i16;
+            *lhs = new_val;
+        }
+        diff
     }
 
     #[inline]
     const fn index_mask(index: u16) -> (usize, u8) {
+        debug_assert!(index < CHUNK_SIZE as u16);
+        let index = index % CHUNK_SIZE as u16;
         let byte_index = index / 8;
         let bit_index = index % 8;
         (byte_index as usize, 1 << bit_index)
@@ -42,72 +51,102 @@ impl Chunk {
 }
 
 struct Segment {
-    chunk: Chunk,
-    changed: Arc<Notify>,
-    watch: watch::Receiver<Chunk>,
-    task: tokio::task::JoinHandle<()>,
+    watch: watch::Sender<Chunk>,
 }
 
-#[derive(Clone, Default)]
+impl Default for Segment {
+    fn default() -> Self {
+        Self {
+            watch: watch::Sender::new(Chunk::new()),
+        }
+    }
+}
+
+#[derive(Default)]
 pub struct SharedBitmap {
-    segments: Arc<DashMap<u32, Segment>>,
+    segments: DashMap<u32, Segment>,
+    count: AtomicU64,
 }
 
 impl SharedBitmap {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn toggle(&self, index: u64) {
-        let (segment_index, inner_index) = split_idx(index);
-        let mut segment = self.segments.entry(segment_index).or_insert_with(|| {
-            Self::new_segment(Arc::clone(&self.segments), segment_index)
-        });
 
-        segment.chunk.toggle(inner_index);
-        segment.changed.notify_one()
+    // This is so much better if indices are ordered
+    pub fn toggle_all(&self, indices: &[u64]) {
+        let Some(&first_index) = indices.first() else {
+            return;
+        };
+        let (mut last_segment_index, _) = split_idx(first_index);
+        let mut segment = self
+            .segments
+            .entry(last_segment_index)
+            .or_insert_with(|| Segment {
+                watch: watch::Sender::new(Chunk::new()),
+            })
+            .downgrade();
+        let mut current_chunk = Chunk::new();
+        for &index in indices {
+            let (segment_index, inner_index) = split_idx(index);
+            if segment_index != last_segment_index {
+                segment.watch.send_if_modified(|chunk| {
+                    let diff = chunk.toggle_all(current_chunk);
+                    if diff != 0 {
+                        // Intentionally use i16 as u64, which will sign extend negative values, which
+                        // will work correctly with the atomic add (which overflows)
+                        self.count
+                            .fetch_add(diff as u64, std::sync::atomic::Ordering::Relaxed);
+                        true
+                    } else {
+                        false
+                    }
+                });
+                // Ensure we're not holding the dashmap lock
+                drop(segment);
+                segment = self
+                    .segments
+                    .entry(segment_index)
+                    .or_insert_with(|| Segment {
+                        watch: watch::Sender::new(Chunk::new()),
+                    })
+                    .downgrade();
+                current_chunk = const { Chunk::new() };
+                last_segment_index = segment_index;
+            }
+            current_chunk.toggle(inner_index);
+        }
+        segment.watch.send_if_modified(|chunk| {
+            let diff = chunk.toggle_all(current_chunk);
+            if diff != 0 {
+                // Intentionally use i16 as u64, which will sign extend negative values, which
+                // will work correctly with the atomic add (which overflows)
+                self.count
+                    .fetch_add(diff as u64, std::sync::atomic::Ordering::Relaxed);
+                true
+            } else {
+                false
+            }
+        });
     }
 
     pub fn watch(&self, segment_index: u32) -> watch::Receiver<Chunk> {
-        let segment = self.segments.entry(segment_index).or_insert_with(|| {
-            Self::new_segment(Arc::clone(&self.segments), segment_index)
-        });
-        segment.watch.clone()
+        if let Some(segment) = self.segments.get(&segment_index) {
+            return segment.watch.subscribe();
+        }
+        
+        let segment = self
+            .segments
+            .entry(segment_index)
+            .or_insert_with(|| Segment {
+                watch: watch::Sender::new(Chunk::new()),
+            })
+            .downgrade();
+        segment.watch.subscribe()
     }
 
-    fn new_segment(segments: Arc<DashMap<u32, Segment>>, segment_index: u32) -> Segment {
-        let chunk = Chunk::new();
-        let (tx, rx) = watch::channel(chunk);
-        let notify = Arc::new(Notify::new());
-        let task = {
-            let notify = Arc::clone(&notify);
-            tokio::spawn(async move {
-                loop {
-                    notify.notified().await;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-                    let Some(segment) = segments.get(&segment_index) else {
-                        break;
-                    };
-                    let segment = segment.value();
-                    tx.send_if_modified(
-                        |chunk| {
-                            if *chunk == segment.chunk {
-                                false
-                            } else {
-                                *chunk = segment.chunk;
-                                true
-                            }
-                        },
-                    );
-                }
-            })
-        };
-        Segment {
-            chunk,
-            changed: notify,
-            watch: rx,
-            task,
-        }
-
+    pub fn count(&self) -> u64 {
+        self.count.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

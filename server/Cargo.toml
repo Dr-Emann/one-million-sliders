@@ -4,10 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = { version = "0.7", features = ["http2", "macros"] }
+axum = { version = "0.7", features = ["http2", "macros", "tracing", "tower-log"] }
 base64 = "0.22.1"
 dashmap = "6.0.1"
 futures = "0.3.30"
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1.15", features = ["sync"] }
+itoa = "1.0"
+tracing = { version = "0.1.40", features = ["release_max_level_trace", "max_level_trace"] }
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
