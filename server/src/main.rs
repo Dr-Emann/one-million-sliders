@@ -75,11 +75,14 @@ async fn main() {
     tracing::info!("Got here");
     let app = Router::new()
         .route("/updates", get(range_updates))
-        .route("/toggle/:idx", post(toggle));
+        .route("/toggle/:idx", post(toggle))
+        .layer(tower_http::cors::CorsLayer::new().allow_origin(tower_http::cors::Any));
     let state = Arc::new(SharedState::new());
     let app = app.with_state(Arc::clone(&state));
 
-    let listener = TcpListener::bind((Ipv6Addr::UNSPECIFIED, 8000)).await.unwrap();
+    let listener = TcpListener::bind((Ipv6Addr::UNSPECIFIED, 8000))
+        .await
+        .unwrap();
 
     let toggles = async move {
         tokio::spawn(async move { state.do_toggles().await })
@@ -193,9 +196,16 @@ async fn toggle(
     if idx >= NUM_BITS {
         return Err((StatusCode::BAD_REQUEST, "Index too large").into());
     }
-    tokio::time::timeout(Duration::from_secs(1), toggle_loop(&state, idx))
-        .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let start = Instant::now();
+    let result = tokio::time::timeout(Duration::from_secs(1), toggle_loop(&state, idx)).await;
+    let duration = start.elapsed();
+    if let Err(e) = &result {
+        tracing::error!(?e, "Toggle failed");
+    }
+    if duration > Duration::from_millis(50) {
+        tracing::warn!(?duration, "Toggle took too long");
+    }
+    result.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     Ok(())
 }
 
@@ -219,7 +229,7 @@ async fn toggle_loop(state: &SharedState, idx: u64) {
         if try_push() {
             return;
         }
-        tracing::debug!("Backing off till there's space");
+        tracing::trace!("Backing off till there's space");
         notified.as_mut().await;
         notified.set(state.has_toggles_space.notified());
     }

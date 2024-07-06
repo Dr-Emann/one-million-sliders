@@ -15,13 +15,19 @@ const content = document.getElementById('content');
 const contentContainer = document.getElementById('content-container');
 const data = new Uint8Array(NUM_VALUES / 8);
 function setBit(n, value = true) {
-    console.log("Setting bit", n, "to", value);
+    let changed = false;
     if (value) {
+        changed = (data[n >> 3] & (1 << (n & 7))) === 0;
         data[n >> 3] |= (1 << (n & 7));
     }
     else {
+        changed = (data[n >> 3] & (1 << (n & 7))) !== 0;
         data[n >> 3] &= ~(1 << (n & 7));
     }
+    if (!changed) {
+        return;
+    }
+    console.log("Set bit", n, "to", value);
     const firstRenderedRow = Math.max(0, firstVisibleRow - PADDING_ROWS);
     const row = Math.floor(n / numCols) - firstRenderedRow;
     if (row >= 0 && row < renderedRows.length) {
@@ -86,6 +92,13 @@ function doScroll(force) {
             console.warn("force with non-empty renderedRows");
         }
     }
+    const roundedFirstCheckbox = (((newFirstRenderedRow * numCols) / 512) | 0) * 512;
+    const roundedLastCheckbox = (((newLastRenderedRow * numCols + 511) / 512) | 0) * 512;
+    if (roundedFirstCheckbox !== eventSourceStart || roundedLastCheckbox !== eventSourceEnd) {
+        eventSourceStart = roundedFirstCheckbox;
+        eventSourceEnd = roundedLastCheckbox;
+        createEventSource();
+    }
     for (let i = renderedRows.length; i < newLastRenderedRow - newFirstRenderedRow; i++) {
         const row = makeRow(i + newFirstRenderedRow);
         content.appendChild(row);
@@ -109,12 +122,42 @@ function makeRow(n) {
             break;
         }
         const cb = makeCb(getBit(bitIdx));
-        cb.onchange = (ev) => setBit(bitIdx, ev.currentTarget.checked);
+        cb.onchange = (ev) => {
+            setBit(bitIdx, ev.currentTarget.checked);
+            fetch(`http://localhost:8000/toggle/${bitIdx}`, {
+                method: 'POST',
+            });
+        };
         row.appendChild(cb);
     }
     row.style.top = `${n * cbHeight}px`;
     return row;
 }
+function updateCount(count) {
+    const countEl = document.getElementById('count');
+    countEl.textContent = count.toString();
+}
+function handleUpdate(offset, base64Data) {
+    const data = atob(base64Data);
+    let i = offset;
+    for (let j = 0; j < data.length; j++) {
+        const byte = data.charCodeAt(j);
+        for (let k = 0; k < 8; k++) {
+            setBit(i, (byte & (1 << k)) !== 0);
+            i++;
+        }
+    }
+}
+let eventSourceStart = 0;
+let eventSourceEnd = 0;
+function createEventSource() {
+    eventSource === null || eventSource === void 0 ? void 0 : eventSource.close();
+    eventSource = new EventSource(`http://localhost:8000/updates?start=${eventSourceStart}&end=${eventSourceEnd}`);
+    eventSource.addEventListener("error", createEventSource);
+    eventSource.addEventListener("count", (ev) => updateCount(parseInt(ev.data)));
+    eventSource.addEventListener("update", (ev) => handleUpdate(parseInt(ev.lastEventId), ev.data));
+}
+let eventSource = null;
 window.addEventListener('resize', onResize);
 window.addEventListener('load', onResize);
 contentContainer.addEventListener("scroll", () => doScroll(false));
