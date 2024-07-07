@@ -139,7 +139,7 @@ function makeRow(n: number): HTMLDivElement {
         const cb = makeCb(getBit(bitIdx));
         cb.onchange = (ev) => {
             setBit(bitIdx, (ev.currentTarget as HTMLInputElement).checked);
-            fetch(`http://localhost:8000/toggle/${bitIdx}`, {
+            fetch(`toggle/${bitIdx}`, {
                 method: 'POST',
             })
         }
@@ -170,8 +170,12 @@ let eventSourceStart = 0
 let eventSourceEnd = 0
 function createEventSource(): void {
     eventSource?.close()
-    eventSource = new EventSource(`http://localhost:8000/updates?start=${eventSourceStart}&end=${eventSourceEnd}`);
-    eventSource.addEventListener("error", createEventSource)
+    eventSource = new EventSource(`updates?start=${eventSourceStart}&end=${eventSourceEnd}`);
+    // TODO: Add a delay
+    eventSource.addEventListener("error", () => {
+        eventSource = null
+        setTimeout(createEventSource, 500)
+    })
     eventSource.addEventListener("count", (ev) => updateCount(parseInt(ev.data)))
     eventSource.addEventListener("update", (ev) => handleUpdate(parseInt(ev.lastEventId), ev.data))
 }

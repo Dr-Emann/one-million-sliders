@@ -20,6 +20,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{watch, Notify};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_stream::StreamExt;
+use tower_http::services::ServeDir;
+use tracing_subscriber::fmt::layer;
 
 const NUM_BITS: u64 = 1_000_000;
 const _: () = assert!(NUM_BITS <= MAX_BIT_IDX);
@@ -72,11 +74,12 @@ impl SharedState {
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    tracing::info!("Got here");
     let app = Router::new()
         .route("/updates", get(range_updates))
         .route("/toggle/:idx", post(toggle))
-        .layer(tower_http::cors::CorsLayer::new().allow_origin(tower_http::cors::Any));
+        .nest_service("/", ServeDir::new("www"))
+        .layer(tower_http::cors::CorsLayer::new().allow_origin(tower_http::cors::Any))
+        .layer(tower_http::compression::CompressionLayer::new().gzip(true).br(true));
     let state = Arc::new(SharedState::new());
     let app = app.with_state(Arc::clone(&state));
 
