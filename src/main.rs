@@ -21,13 +21,13 @@ use tokio::sync::{watch, Notify};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_stream::StreamExt;
 use tower_http::services::ServeDir;
-use tracing_subscriber::fmt::layer;
 
-const NUM_BITS: u64 = 1_000_000;
+// One byte per slider
+const NUM_BITS: u64 = 1_000_000 * 8;
 const _: () = assert!(NUM_BITS <= MAX_BIT_IDX);
 
 // Apply backpressure if there are too many pending toggles
-const MAX_TOGGLES: usize = 500;
+const MAX_TOGGLES: usize = 2_000;
 
 struct SharedState {
     bitmap: SharedBitmap,

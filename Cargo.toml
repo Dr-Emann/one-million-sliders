@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 axum = { version = "0.7", features = ["http2", "macros", "tracing", "tower-log"] }
 base64 = "0.22.1"
-dashmap = "6.0.1"
+memmap2 = "0.9.4"
 futures = "0.3.30"
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }

@@ -1,4 +1,6 @@
+use ahash::AHasher;
 use dashmap::DashMap;
+use std::iter;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::watch;
 
@@ -64,7 +66,7 @@ impl Default for Segment {
 
 #[derive(Default)]
 pub struct SharedBitmap {
-    segments: DashMap<u32, Segment>,
+    segments: DashMap<u32, Segment, ahash::RandomState>,
     count: AtomicU64,
 }
 
@@ -73,19 +75,28 @@ impl SharedBitmap {
         Self::default()
     }
 
+    pub fn set_bytes(&self, mut bytes: impl Iterator<Item = (u64, u8)>) {
+        let mut bytes: iter::Peekable<_> = bytes.peekable();
+        let Some((last_segment_index, _)) = bytes.peek().map(|&(i, _v)| split_idx(i)) else {
+            return;
+        };
+        let mut segment = self.get_segment(last_segment_index);
+
+        for (index, value) in &mut bytes {
+            let (segment_index, inner_index) = split_idx(index);
+            if segment_index != last_segment_index {
+                
+            }
+        }
+    }
+
     // This is so much better if indices are ordered
     pub fn toggle_all(&self, indices: &[u64]) {
         let Some(&first_index) = indices.first() else {
             return;
         };
         let (mut last_segment_index, _) = split_idx(first_index);
-        let mut segment = self
-            .segments
-            .entry(last_segment_index)
-            .or_insert_with(|| Segment {
-                watch: watch::Sender::new(Chunk::new()),
-            })
-            .downgrade();
+        let mut segment = self.get_segment(last_segment_index);
         let mut current_chunk = Chunk::new();
         for &index in indices {
             let (segment_index, inner_index) = split_idx(index);
@@ -102,15 +113,10 @@ impl SharedBitmap {
                         false
                     }
                 });
-                // Ensure we're not holding the dashmap lock
+                // Ensure we're not holding the dashmap lock on the old segment while getting the
+                // new segment
                 drop(segment);
-                segment = self
-                    .segments
-                    .entry(segment_index)
-                    .or_insert_with(|| Segment {
-                        watch: watch::Sender::new(Chunk::new()),
-                    })
-                    .downgrade();
+                segment = self.get_segment(segment_index);
                 current_chunk = const { Chunk::new() };
                 last_segment_index = segment_index;
             }
@@ -130,18 +136,20 @@ impl SharedBitmap {
         });
     }
 
+    fn get_segment(&self, segment_index: u32) -> dashmap::mapref::one::Ref<'_, u32, Segment> {
+        if let Some(segment) = self.segments.get(&segment_index) {
+            return segment;
+        }
+
+        self.segments.entry(segment_index).or_default().downgrade()
+    }
+
     pub fn watch(&self, segment_index: u32) -> watch::Receiver<Chunk> {
         if let Some(segment) = self.segments.get(&segment_index) {
             return segment.watch.subscribe();
         }
-        
-        let segment = self
-            .segments
-            .entry(segment_index)
-            .or_insert_with(|| Segment {
-                watch: watch::Sender::new(Chunk::new()),
-            })
-            .downgrade();
+
+        let segment = self.get_segment(segment_index);
         segment.watch.subscribe()
     }
 
