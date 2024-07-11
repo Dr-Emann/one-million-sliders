@@ -171,9 +171,8 @@ let eventSourceEnd = 0
 function createEventSource(): void {
     eventSource?.close()
     eventSource = new EventSource(`updates?start=${eventSourceStart}&end=${eventSourceEnd}`);
-    // TODO: Add a delay
     eventSource.addEventListener("error", () => {
-        eventSource = null
+        eventSource?.close()
         setTimeout(createEventSource, 500)
     })
     eventSource.addEventListener("count", (ev) => updateCount(parseInt(ev.data)))

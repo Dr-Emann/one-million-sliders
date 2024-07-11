@@ -15,7 +15,14 @@ use futures::{stream, Stream};
 use tokio::net::TcpListener;
 use tokio::time::MissedTickBehavior;
 use tokio_stream::StreamExt;
+use tower::ServiceBuilder;
 use tower_http::services::ServeDir;
+use tower_http::trace::{DefaultOnResponse, TraceLayer};
+use tower_http::LatencyUnit;
+use tracing::{debug, Span};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::EnvFilter;
 
 use crate::shared_bitmap::{SharedBitmap, SharedBitmapRunningTasks, CHUNK_BITS, CHUNK_BYTES};
 
@@ -45,18 +52,28 @@ impl SharedState {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(EnvFilter::from_default_env())
+        .init();
 
     let app = Router::new()
         .route("/updates", get(range_updates))
         .route("/toggle/:idx", post(toggle))
         .route("/set_byte/:idx/:value", post(set_byte))
         .nest_service("/", ServeDir::new("www"))
-        .layer(tower_http::cors::CorsLayer::new().allow_origin(tower_http::cors::Any))
         .layer(
-            tower_http::compression::CompressionLayer::new()
-                .gzip(true)
-                .br(true),
+            ServiceBuilder::new()
+                .layer(
+                    TraceLayer::new_for_http()
+                        .on_response(DefaultOnResponse::new().latency_unit(LatencyUnit::Micros)),
+                )
+                .layer(tower_http::cors::CorsLayer::new().allow_origin(tower_http::cors::Any))
+                .layer(
+                    tower_http::compression::CompressionLayer::new()
+                        .gzip(true)
+                        .br(true),
+                ),
         );
     let app = app.with_state(SharedState::new().unwrap());
 
@@ -73,8 +90,7 @@ struct Range {
     end: u64,
 }
 
-#[axum::debug_handler]
-#[tracing::instrument(skip_all, fields(start=range.start, end=range.end))]
+#[tracing::instrument(skip(state, range), fields(start=range.start, end=range.end))]
 async fn range_updates(
     State(state): State<SharedState>,
     Query(range): Query<Range>,
@@ -95,8 +111,13 @@ async fn range_updates(
             .into());
     }
 
+    let span = Span::current();
     let watches = (start_chunk..end_chunk).map(|i| {
-        tokio_stream::wrappers::WatchStream::new(state.bitmap.watch(i)).map(move |chunk| (i, chunk))
+        let span = span.clone();
+        tokio_stream::wrappers::WatchStream::new(state.bitmap.watch(i)).map(move |chunk| {
+            debug!(parent: &span, i, "going to send a chunk update");
+            (i, chunk)
+        })
     });
     let mut b64_chunk = [0; CHUNK_BYTES * 4 / 3 + 4];
     let mut i_buffer = itoa::Buffer::new();
@@ -119,10 +140,20 @@ async fn range_updates(
     // This will never be the actual count, so we'll always send the first update
     let mut last_count = u64::MAX;
     let mut int_buffer = itoa::Buffer::new();
+    struct LogOnDisconnect(Span);
+    impl Drop for LogOnDisconnect {
+        fn drop(&mut self) {
+            debug!(parent: &self.0, "client disconnected");
+        }
+    }
+    let log_on_disconnect = LogOnDisconnect(span.clone());
     let count_stream =
         tokio_stream::wrappers::IntervalStream::new(interval).filter_map(move |_tick| {
+            // Move the logger into the closure to ensure it's dropped when the stream ends
+            let _log_on_disconnect = &log_on_disconnect;
             let count = state.bitmap.count();
             if count != last_count {
+                debug!(parent: &span, count, last_count, "going to send a count update");
                 last_count = count;
                 let count_str = int_buffer.format(count);
                 Some(sse::Event::default().data(count_str).event("count"))
@@ -137,8 +168,7 @@ async fn range_updates(
     Ok(Sse::new(stream).keep_alive(sse::KeepAlive::new()))
 }
 
-#[axum::debug_handler]
-#[tracing::instrument(skip_all, fields(idx))]
+#[tracing::instrument(skip(state))]
 async fn toggle(
     State(state): State<SharedState>,
     Path(idx): Path<u64>,
@@ -150,8 +180,7 @@ async fn toggle(
     Ok(())
 }
 
-#[axum::debug_handler]
-#[tracing::instrument(skip_all, fields(idx, value))]
+#[tracing::instrument(skip(state))]
 async fn set_byte(
     State(state): State<SharedState>,
     Path((idx, value)): Path<(u64, u8)>,

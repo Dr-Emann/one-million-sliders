@@ -153,9 +153,8 @@ let eventSourceEnd = 0;
 function createEventSource() {
     eventSource === null || eventSource === void 0 ? void 0 : eventSource.close();
     eventSource = new EventSource(`updates?start=${eventSourceStart}&end=${eventSourceEnd}`);
-    // TODO: Add a delay
     eventSource.addEventListener("error", () => {
-        eventSource = null;
+        eventSource === null || eventSource === void 0 ? void 0 : eventSource.close();
         setTimeout(createEventSource, 500);
     });
     eventSource.addEventListener("count", (ev) => updateCount(parseInt(ev.data)));

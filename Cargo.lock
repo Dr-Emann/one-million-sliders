@@ -843,6 +843,7 @@ dependencies = [
  "serde",
  "tokio",
  "tokio-stream",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
