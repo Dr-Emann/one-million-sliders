@@ -17,7 +17,7 @@ let renderedRows: Element[] = []
 const content = document.getElementById('content')!;
 const contentContainer = document.getElementById('content-container')!;
 
-const data = new Uint8Array(NUM_VALUES / 8)
+const data = new Uint8Array(NUM_VALUES)
 
 function setBit(n: number, value: boolean = true): void {
     let changed = false

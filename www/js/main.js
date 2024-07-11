@@ -13,7 +13,7 @@ let firstVisibleRow = 0;
 let renderedRows = [];
 const content = document.getElementById('content');
 const contentContainer = document.getElementById('content-container');
-const data = new Uint8Array(NUM_VALUES / 8);
+const data = new Uint8Array(NUM_VALUES);
 function setBit(n, value = true) {
     let changed = false;
     if (value) {
