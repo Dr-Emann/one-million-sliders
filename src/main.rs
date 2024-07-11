@@ -1,6 +1,9 @@
-mod shared_bitmap;
+use std::convert::Infallible;
+use std::io;
+use std::net::Ipv6Addr;
+use std::sync::Arc;
+use std::time::Duration;
 
-use crate::shared_bitmap::{SharedBitmap, CHUNK_BYTES, CHUNK_SIZE, MAX_BIT_IDX};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{sse, Sse};
@@ -9,64 +12,34 @@ use axum::Router;
 use base64::prelude::BASE64_STANDARD_NO_PAD;
 use base64::Engine;
 use futures::{stream, Stream};
-use std::convert::Infallible;
-use std::future::IntoFuture;
-use std::mem;
-use std::net::Ipv6Addr;
-use std::pin::pin;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::sync::{watch, Notify};
-use tokio::time::{Instant, MissedTickBehavior};
+use tokio::time::MissedTickBehavior;
 use tokio_stream::StreamExt;
 use tower_http::services::ServeDir;
 
+use crate::shared_bitmap::{SharedBitmap, SharedBitmapRunningTasks, CHUNK_BITS, CHUNK_BYTES};
+
+mod shared_bitmap;
+
 // One byte per slider
-const NUM_BITS: u64 = 1_000_000 * 8;
-const _: () = assert!(NUM_BITS <= MAX_BIT_IDX);
+const NUM_SLIDERS: usize = 1_000_000;
+const NUM_CHECKBOXES: usize = NUM_SLIDERS * 8;
 
-// Apply backpressure if there are too many pending toggles
-const MAX_TOGGLES: usize = 2_000;
-
+#[derive(Clone)]
 struct SharedState {
-    bitmap: SharedBitmap,
-    has_toggles: Notify,
-    pending_toggles: Mutex<Vec<u64>>,
-    has_toggles_space: Notify,
+    bitmap: Arc<SharedBitmap>,
+    _tasks: Arc<SharedBitmapRunningTasks>,
 }
 
 impl SharedState {
-    fn new() -> Self {
-        let bitmap = SharedBitmap::new();
+    fn new() -> io::Result<Self> {
+        let bitmap = Arc::new(SharedBitmap::load_or_create("bitmap.bin")?);
+        let tasks = Arc::new(bitmap.run_tasks());
 
-        Self {
+        Ok(Self {
             bitmap,
-            has_toggles: Default::default(),
-            pending_toggles: Default::default(),
-            has_toggles_space: Default::default(),
-        }
-    }
-
-    async fn do_toggles(&self) {
-        let mut current_toggles = Vec::new();
-        let mut notified = pin!(self.has_toggles.notified());
-        loop {
-            notified.as_mut().await;
-            notified.set(self.has_toggles.notified());
-            notified.as_mut().enable();
-            mem::swap(
-                &mut current_toggles,
-                &mut *self.pending_toggles.lock().unwrap(),
-            );
-            self.has_toggles_space.notify_one();
-
-            current_toggles.sort_unstable();
-            tracing::trace!(count = current_toggles.len(), "Toggling bits");
-            self.bitmap.toggle_all(&current_toggles);
-
-            current_toggles.clear();
-        }
+            _tasks: tasks,
+        })
     }
 }
 
@@ -77,26 +50,21 @@ async fn main() {
     let app = Router::new()
         .route("/updates", get(range_updates))
         .route("/toggle/:idx", post(toggle))
+        .route("/set_byte/:idx/:value", post(set_byte))
         .nest_service("/", ServeDir::new("www"))
         .layer(tower_http::cors::CorsLayer::new().allow_origin(tower_http::cors::Any))
-        .layer(tower_http::compression::CompressionLayer::new().gzip(true).br(true));
-    let state = Arc::new(SharedState::new());
-    let app = app.with_state(Arc::clone(&state));
+        .layer(
+            tower_http::compression::CompressionLayer::new()
+                .gzip(true)
+                .br(true),
+        );
+    let app = app.with_state(SharedState::new().unwrap());
 
     let listener = TcpListener::bind((Ipv6Addr::UNSPECIFIED, 8000))
         .await
         .unwrap();
 
-    let toggles = async move {
-        tokio::spawn(async move { state.do_toggles().await })
-            .await
-            .unwrap();
-        Ok(())
-    };
-    let service = axum::serve(listener, app);
-    let service_future = pin!(service.into_future());
-
-    tokio::try_join!(toggles, service_future).unwrap();
+    axum::serve(listener, app).await.unwrap();
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Debug)]
@@ -108,16 +76,18 @@ struct Range {
 #[axum::debug_handler]
 #[tracing::instrument(skip_all, fields(start=range.start, end=range.end))]
 async fn range_updates(
-    State(state): State<Arc<SharedState>>,
-    Query(mut range): Query<Range>,
+    State(state): State<SharedState>,
+    Query(range): Query<Range>,
 ) -> axum::response::Result<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
     if range.start > range.end {
         return Err((StatusCode::BAD_REQUEST, "start must be less than end").into());
     }
-    range.start = range.start / CHUNK_SIZE as u64 * CHUNK_SIZE as u64;
-    range.end = range.end.next_multiple_of(CHUNK_SIZE as u64);
-
-    if range.end - range.start > 10_000 {
+    if range.end > NUM_CHECKBOXES as u64 {
+        return Err((StatusCode::BAD_REQUEST, "end too large").into());
+    }
+    let start_chunk = (range.start / CHUNK_BITS as u64) as usize;
+    let end_chunk = ((range.end + CHUNK_BITS as u64 - 1) / CHUNK_BITS as u64) as usize;
+    if (end_chunk - start_chunk) * CHUNK_BITS > 10_000 {
         return Err((
             StatusCode::BAD_REQUEST,
             "Cannot listen to such a large range",
@@ -125,41 +95,18 @@ async fn range_updates(
             .into());
     }
 
-    let watches = (range.start / CHUNK_SIZE as u64..range.end / CHUNK_SIZE as u64).map(|i| {
-        struct State {
-            next_notify: Instant,
-            watcher: watch::Receiver<shared_bitmap::Chunk>,
-        }
-        let i = i as u32;
-
-        let state = State {
-            next_notify: Instant::now(),
-            watcher: {
-                let mut watcher = state.bitmap.watch(i);
-                // Report the initial state too
-                watcher.mark_changed();
-                watcher
-            },
-        };
-        Box::pin(stream::unfold(state, move |mut state| async move {
-            state.watcher.changed().await.unwrap();
-            tokio::time::sleep_until(state.next_notify.clone()).await;
-            let chunk = *state.watcher.borrow_and_update();
-
-            state.next_notify = Instant::now() + Duration::from_millis(100);
-
-            return Some(((i, chunk), state));
-        }))
+    let watches = (start_chunk..end_chunk).map(|i| {
+        tokio_stream::wrappers::WatchStream::new(state.bitmap.watch(i)).map(move |chunk| (i, chunk))
     });
     let mut b64_chunk = [0; CHUNK_BYTES * 4 / 3 + 4];
     let mut i_buffer = itoa::Buffer::new();
     let stream = stream::select_all(watches).map(move |(i, chunk)| {
         let len = BASE64_STANDARD_NO_PAD
-            .encode_slice(&chunk.0, &mut b64_chunk)
+            .encode_slice(chunk.0, &mut b64_chunk)
             .expect("a chunk is guaranteed to fit in the available space");
         // SAFETY: base64 encoding is guaranteed to be valid UTF-8
         let b64_chunk: &str = unsafe { std::str::from_utf8_unchecked(&b64_chunk[..len]) };
-        let i_str = i_buffer.format(u64::from(i) * CHUNK_SIZE as u64);
+        let i_str = i_buffer.format(i as u64 * CHUNK_BITS as u64);
         sse::Event::default()
             .data(b64_chunk)
             .id(i_str)
@@ -193,47 +140,25 @@ async fn range_updates(
 #[axum::debug_handler]
 #[tracing::instrument(skip_all, fields(idx))]
 async fn toggle(
-    State(state): State<Arc<SharedState>>,
+    State(state): State<SharedState>,
     Path(idx): Path<u64>,
 ) -> axum::response::Result<()> {
-    if idx >= NUM_BITS {
+    if idx >= NUM_CHECKBOXES as u64 {
         return Err((StatusCode::BAD_REQUEST, "Index too large").into());
     }
-    let start = Instant::now();
-    let result = tokio::time::timeout(Duration::from_secs(1), toggle_loop(&state, idx)).await;
-    let duration = start.elapsed();
-    if let Err(e) = &result {
-        tracing::error!(?e, "Toggle failed");
-    }
-    if duration > Duration::from_millis(50) {
-        tracing::warn!(?duration, "Toggle took too long");
-    }
-    result.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    state.bitmap.toggle(idx as usize);
     Ok(())
 }
 
-async fn toggle_loop(state: &SharedState, idx: u64) {
-    let try_push = || {
-        let mut pending_toggles = state.pending_toggles.lock().unwrap();
-        if pending_toggles.len() >= MAX_TOGGLES {
-            false
-        } else {
-            pending_toggles.push(idx);
-            state.has_toggles.notify_one();
-            if pending_toggles.len() < MAX_TOGGLES {
-                state.has_toggles_space.notify_one();
-            }
-            true
-        }
-    };
-    let mut notified = pin!(state.has_toggles_space.notified());
-    loop {
-        notified.as_mut().enable();
-        if try_push() {
-            return;
-        }
-        tracing::trace!("Backing off till there's space");
-        notified.as_mut().await;
-        notified.set(state.has_toggles_space.notified());
+#[axum::debug_handler]
+#[tracing::instrument(skip_all, fields(idx, value))]
+async fn set_byte(
+    State(state): State<SharedState>,
+    Path((idx, value)): Path<(u64, u8)>,
+) -> axum::response::Result<()> {
+    if idx >= NUM_SLIDERS as u64 {
+        return Err((StatusCode::BAD_REQUEST, "Index too large").into());
     }
+    state.bitmap.set_byte(idx as usize, value);
+    Ok(())
 }

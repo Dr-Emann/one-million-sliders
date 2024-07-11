@@ -1,14 +1,22 @@
-use ahash::AHasher;
-use dashmap::DashMap;
-use std::iter;
+use std::fs::File;
+use std::io;
+use std::path::Path;
 use std::sync::atomic::AtomicU64;
-use tokio::sync::watch;
+use std::sync::{Arc, Mutex};
 
-pub const CHUNK_SIZE: usize = 512;
-pub const CHUNK_BYTES: usize = (CHUNK_SIZE + 7) / 8;
-pub const MAX_BIT_IDX: u64 = (u32::MAX as u64) * CHUNK_SIZE as u64;
+use memmap2::{MmapOptions, MmapRaw};
+use tokio::sync::{watch, Notify};
+use tokio::task::JoinHandle;
+use tokio::time::Instant;
+
+pub const CHUNK_BYTES: usize = 128;
+pub const CHUNK_BITS: usize = CHUNK_BYTES * 8;
+
+const TOTAL_BITS: usize = crate::NUM_CHECKBOXES;
+const NUM_CHUNKS: usize = TOTAL_BITS / CHUNK_BITS;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct Chunk(pub [u8; CHUNK_BYTES]);
 
 impl Default for Chunk {
@@ -22,7 +30,7 @@ impl Chunk {
         Self([0; CHUNK_BYTES])
     }
 
-    // Returns if the byte was added
+    // Returns if the byte was added, otherwise, it was removed
     pub fn toggle(&mut self, index: u16) -> bool {
         let (byte_index, mask) = Self::index_mask(index);
         let byte = &mut self.0[byte_index];
@@ -30,127 +38,147 @@ impl Chunk {
         (*byte & mask) != 0
     }
 
-    // Returns the difference in the number of set bits
-    pub fn toggle_all(&mut self, rhs: Self) -> i16 {
-        const _: () = assert!((CHUNK_SIZE as u64) < u16::MAX as u64);
-        let mut diff = 0;
-        for (lhs, &rhs) in self.0.iter_mut().zip(rhs.0.iter()) {
-            let new_val = *lhs ^ rhs;
-            diff += new_val.count_ones() as i16 - lhs.count_ones() as i16;
-            *lhs = new_val;
-        }
-        diff
-    }
-
     #[inline]
     const fn index_mask(index: u16) -> (usize, u8) {
-        debug_assert!(index < CHUNK_SIZE as u16);
-        let index = index % CHUNK_SIZE as u16;
+        debug_assert!(index < CHUNK_BITS as u16);
+        let index = index % CHUNK_BITS as u16;
         let byte_index = index / 8;
         let bit_index = index % 8;
         (byte_index as usize, 1 << bit_index)
     }
 }
 
+#[repr(align(128))]
 struct Segment {
+    lock: Mutex<()>,
+    notify_changed: Notify,
     watch: watch::Sender<Chunk>,
 }
 
 impl Default for Segment {
     fn default() -> Self {
         Self {
+            lock: Mutex::new(()),
+            notify_changed: Notify::new(),
             watch: watch::Sender::new(Chunk::new()),
         }
     }
 }
+impl Segment {
+    fn from_bytes(current_slice: &[u8; CHUNK_BYTES]) -> Self {
+        Self {
+            lock: Mutex::new(()),
+            notify_changed: Notify::new(),
+            watch: watch::Sender::new(Chunk(*current_slice)),
+        }
+    }
+}
 
-#[derive(Default)]
 pub struct SharedBitmap {
-    segments: DashMap<u32, Segment, ahash::RandomState>,
+    segments: Box<[Segment; NUM_CHUNKS]>,
+    map: MmapRaw,
     count: AtomicU64,
 }
 
 impl SharedBitmap {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn load_or_create<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        Self::_load_or_create(path.as_ref())
     }
 
-    pub fn set_bytes(&self, mut bytes: impl Iterator<Item = (u64, u8)>) {
-        let mut bytes: iter::Peekable<_> = bytes.peekable();
-        let Some((last_segment_index, _)) = bytes.peek().map(|&(i, _v)| split_idx(i)) else {
-            return;
-        };
-        let mut segment = self.get_segment(last_segment_index);
+    fn _load_or_create(path: &Path) -> io::Result<Self> {
+        let file = File::options()
+            .write(true)
+            .read(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
 
-        for (index, value) in &mut bytes {
-            let (segment_index, inner_index) = split_idx(index);
-            if segment_index != last_segment_index {
-                
-            }
-        }
+        file.set_len(NUM_CHUNKS as u64 * CHUNK_BYTES as u64)?;
+
+        let map = unsafe { MmapOptions::new().map_mut(&file)? };
+        let count = map.iter().map(|&byte| byte.count_ones() as u64).sum();
+
+        let segment = |i| {
+            let slice = &map[i * CHUNK_BYTES..][..CHUNK_BYTES];
+            let slice: &[u8; CHUNK_BYTES] = slice.try_into().unwrap();
+            Segment::from_bytes(slice)
+        };
+        let segments: Box<[Segment]> = (0..NUM_CHUNKS).map(segment).collect();
+        let segments = segments.try_into().map_err(|_| ()).unwrap();
+        Ok(Self {
+            segments,
+            map: MmapRaw::from(map),
+            count: AtomicU64::new(count),
+        })
     }
 
-    // This is so much better if indices are ordered
-    pub fn toggle_all(&self, indices: &[u64]) {
-        let Some(&first_index) = indices.first() else {
-            return;
-        };
-        let (mut last_segment_index, _) = split_idx(first_index);
-        let mut segment = self.get_segment(last_segment_index);
-        let mut current_chunk = Chunk::new();
-        for &index in indices {
-            let (segment_index, inner_index) = split_idx(index);
-            if segment_index != last_segment_index {
-                segment.watch.send_if_modified(|chunk| {
-                    let diff = chunk.toggle_all(current_chunk);
-                    if diff != 0 {
-                        // Intentionally use i16 as u64, which will sign extend negative values, which
-                        // will work correctly with the atomic add (which overflows)
-                        self.count
-                            .fetch_add(diff as u64, std::sync::atomic::Ordering::Relaxed);
-                        true
-                    } else {
-                        false
+    pub fn run_tasks(self: &Arc<Self>) -> SharedBitmapRunningTasks {
+        let tasks: Vec<_> = (0..self.segments.len())
+            .map(|i| {
+                let shared = Arc::clone(self);
+                tokio::spawn(async move {
+                    let segment = &shared.segments[i];
+                    let mut next_possible_update = Instant::now();
+                    loop {
+                        segment.notify_changed.notified().await;
+                        tokio::time::sleep_until(next_possible_update).await;
+                        next_possible_update =
+                            Instant::now() + std::time::Duration::from_millis(100);
+
+                        let chunk = shared.with_chunk(i, |chunk, _| *chunk);
+                        segment.watch.send_modify(|c| *c = chunk);
                     }
-                });
-                // Ensure we're not holding the dashmap lock on the old segment while getting the
-                // new segment
-                drop(segment);
-                segment = self.get_segment(segment_index);
-                current_chunk = const { Chunk::new() };
-                last_segment_index = segment_index;
-            }
-            current_chunk.toggle(inner_index);
-        }
-        segment.watch.send_if_modified(|chunk| {
-            let diff = chunk.toggle_all(current_chunk);
-            if diff != 0 {
-                // Intentionally use i16 as u64, which will sign extend negative values, which
-                // will work correctly with the atomic add (which overflows)
-                self.count
-                    .fetch_add(diff as u64, std::sync::atomic::Ordering::Relaxed);
-                true
-            } else {
-                false
-            }
+                })
+            })
+            .collect();
+        SharedBitmapRunningTasks { tasks }
+    }
+
+    fn with_chunk<F, O>(&self, index: usize, f: F) -> O
+    where
+        F: FnOnce(&mut Chunk, &Notify) -> O,
+    {
+        let segment = &self.segments[index];
+        let _guard = segment.lock.lock().unwrap();
+        // SAFETY: The above guard ensures that only one segment has this chunk at a time
+        let chunk = unsafe {
+            &mut *self
+                .map
+                .as_mut_ptr()
+                .add(index * CHUNK_BYTES)
+                .cast::<Chunk>()
+        };
+        f(chunk, &segment.notify_changed)
+    }
+
+    pub fn set_byte(&self, index: usize, byte: u8) {
+        let mut prev = 0;
+        self.with_chunk(index / CHUNK_BYTES, |chunk, notify| {
+            let inner_idx = index % CHUNK_BYTES;
+            prev = chunk.0[inner_idx];
+            chunk.0[inner_idx] = byte;
+            notify.notify_one();
         });
+        let diff = byte.count_ones() as i32 - prev.count_ones() as i32;
+        // use `as u64` which will sign extend, adding a sign extended negative value will act the
+        // same as subtracting
+        self.count
+            .fetch_add(diff as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
-    fn get_segment(&self, segment_index: u32) -> dashmap::mapref::one::Ref<'_, u32, Segment> {
-        if let Some(segment) = self.segments.get(&segment_index) {
-            return segment;
-        }
-
-        self.segments.entry(segment_index).or_default().downgrade()
+    pub fn toggle(&self, bit_index: usize) {
+        let mut added = false;
+        self.with_chunk(bit_index / CHUNK_BITS, |chunk, notify| {
+            added = chunk.toggle((bit_index % CHUNK_BITS) as u16);
+            notify.notify_one();
+        });
+        let diff = if added { 1 } else { -1 };
+        self.count
+            .fetch_add(diff as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub fn watch(&self, segment_index: u32) -> watch::Receiver<Chunk> {
-        if let Some(segment) = self.segments.get(&segment_index) {
-            return segment.watch.subscribe();
-        }
-
-        let segment = self.get_segment(segment_index);
-        segment.watch.subscribe()
+    pub fn watch(&self, segment_index: usize) -> watch::Receiver<Chunk> {
+        self.segments[segment_index].watch.subscribe()
     }
 
     pub fn count(&self) -> u64 {
@@ -158,9 +186,14 @@ impl SharedBitmap {
     }
 }
 
-const fn split_idx(index: u64) -> (u32, u16) {
-    assert!(index < MAX_BIT_IDX);
-    let segment_index = (index / CHUNK_SIZE as u64) as u32;
-    let inner_index = (index % CHUNK_SIZE as u64) as u16;
-    (segment_index, inner_index)
+pub struct SharedBitmapRunningTasks {
+    tasks: Vec<JoinHandle<()>>,
+}
+
+impl Drop for SharedBitmapRunningTasks {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
 }
