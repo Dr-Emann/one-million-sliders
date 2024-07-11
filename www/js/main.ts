@@ -31,17 +31,31 @@ function setBit(n: number, value: boolean = true): void {
     if (!changed) {
         return
     }
-    console.log("Set bit", n, "to", value)
-    const firstRenderedRow = Math.max(0, firstVisibleRow - PADDING_ROWS);
-    const row = Math.floor(n / numCols) - firstRenderedRow;
-    if (row >= 0 && row < renderedRows.length) {
-        const cb = renderedRows[row].children[n % numCols].children[0] as HTMLInputElement;
-        cb.checked = value;
-    }
 }
 
 function getBit(n: number): boolean {
     return (data[n >> 3] & (1 << (n & 7))) !== 0
+}
+
+function setByte(n: number, value: number): void {
+    value = value & 0xFF
+    let prev = getByte(n)
+    data[n] = value
+    const changed = data[n] != prev
+    if (!changed) {
+        return
+    }
+    console.log("Set byte", n, "to", value)
+    const firstRenderedRow = Math.max(0, firstVisibleRow - PADDING_ROWS);
+    const row = Math.floor(n / numCols) - firstRenderedRow;
+    if (row >= 0 && row < renderedRows.length) {
+        const cb = renderedRows[row].children[n % numCols].children[0] as HTMLInputElement;
+        cb.value = value.toString()
+    }
+}
+
+function getByte(n: number): number {
+    return data[n]
 }
 
 function onResize(): void {
@@ -53,7 +67,7 @@ function onResize(): void {
     visibleWidth = content.clientWidth;
 
     // Create a checkbox, then measure its width and height
-    const item = makeCb();
+    const item = makeSlider(0);
     content.appendChild(item);
     cbWidth = item.clientWidth;
     cbHeight = item.clientHeight;
@@ -118,6 +132,17 @@ function doScroll(force: boolean): void {
     }
 }
 
+function makeSlider(value: number): HTMLDivElement {
+    const slider = document.createElement('div')
+    slider.className = 'slider'
+    const input = slider.appendChild(document.createElement('input'))
+    input.type = 'range'
+    input.min = '0'
+    input.max = '255'
+    input.value = value.toString()
+    return slider
+}
+
 function makeCb(checked: boolean = false): HTMLDivElement {
     const cb = document.createElement('div');
     cb.className = 'cb';
@@ -132,18 +157,21 @@ function makeRow(n: number): HTMLDivElement {
     const row = document.createElement('div');
     row.className = 'cb-row';
     for (let i = 0; i < numCols; i++) {
-        let bitIdx = n * numCols + i;
-        if (bitIdx >= NUM_VALUES) {
+        let byteIdx = n * numCols + i;
+        if (byteIdx >= NUM_VALUES) {
             break
         }
-        const cb = makeCb(getBit(bitIdx));
-        cb.onchange = (ev) => {
-            setBit(bitIdx, (ev.currentTarget as HTMLInputElement).checked);
-            fetch(`toggle/${bitIdx}`, {
+        const slider = makeSlider(getByte(byteIdx))
+        slider.onchange = (ev) => {
+            const target = ev.currentTarget as HTMLDivElement
+            const inputElem = target.children[0] as HTMLInputElement
+            const value = parseInt(inputElem.value);
+            setByte(byteIdx, value)
+            fetch(`set_byte/${byteIdx}/${value}`, {
                 method: 'POST',
             })
         }
-        row.appendChild(cb);
+        row.appendChild(slider)
     }
     row.style.top = `${n * cbHeight}px`;
     return row;
@@ -159,10 +187,7 @@ function handleUpdate(offset: number, base64Data: string): void {
     let i = offset;
     for (let j = 0; j < data.length; j++) {
         const byte = data.charCodeAt(j);
-        for (let k = 0; k < 8; k++) {
-            setBit(i, (byte & (1 << k)) !== 0);
-            i++;
-        }
+        setByte(i + j, byte)
     }
 }
 

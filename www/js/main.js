@@ -27,16 +27,28 @@ function setBit(n, value = true) {
     if (!changed) {
         return;
     }
-    console.log("Set bit", n, "to", value);
+}
+function getBit(n) {
+    return (data[n >> 3] & (1 << (n & 7))) !== 0;
+}
+function setByte(n, value) {
+    value = value & 0xFF;
+    let prev = getByte(n);
+    data[n] = value;
+    const changed = data[n] != prev;
+    if (!changed) {
+        return;
+    }
+    console.log("Set byte", n, "to", value);
     const firstRenderedRow = Math.max(0, firstVisibleRow - PADDING_ROWS);
     const row = Math.floor(n / numCols) - firstRenderedRow;
     if (row >= 0 && row < renderedRows.length) {
         const cb = renderedRows[row].children[n % numCols].children[0];
-        cb.checked = value;
+        cb.value = value.toString();
     }
 }
-function getBit(n) {
-    return (data[n >> 3] & (1 << (n & 7))) !== 0;
+function getByte(n) {
+    return data[n];
 }
 function onResize() {
     const firstVisibleCb = firstVisibleRow * numCols;
@@ -46,7 +58,7 @@ function onResize() {
     renderedRows = [];
     visibleWidth = content.clientWidth;
     // Create a checkbox, then measure its width and height
-    const item = makeCb();
+    const item = makeSlider(0);
     content.appendChild(item);
     cbWidth = item.clientWidth;
     cbHeight = item.clientHeight;
@@ -105,6 +117,16 @@ function doScroll(force) {
         renderedRows.push(row);
     }
 }
+function makeSlider(value) {
+    const slider = document.createElement('div');
+    slider.className = 'slider';
+    const input = slider.appendChild(document.createElement('input'));
+    input.type = 'range';
+    input.min = '0';
+    input.max = '255';
+    input.value = value.toString();
+    return slider;
+}
 function makeCb(checked = false) {
     const cb = document.createElement('div');
     cb.className = 'cb';
@@ -117,18 +139,21 @@ function makeRow(n) {
     const row = document.createElement('div');
     row.className = 'cb-row';
     for (let i = 0; i < numCols; i++) {
-        let bitIdx = n * numCols + i;
-        if (bitIdx >= NUM_VALUES) {
+        let byteIdx = n * numCols + i;
+        if (byteIdx >= NUM_VALUES) {
             break;
         }
-        const cb = makeCb(getBit(bitIdx));
-        cb.onchange = (ev) => {
-            setBit(bitIdx, ev.currentTarget.checked);
-            fetch(`toggle/${bitIdx}`, {
+        const slider = makeSlider(getByte(byteIdx));
+        slider.onchange = (ev) => {
+            const target = ev.currentTarget;
+            const inputElem = target.children[0];
+            const value = parseInt(inputElem.value);
+            setByte(byteIdx, value);
+            fetch(`set_byte/${byteIdx}/${value}`, {
                 method: 'POST',
             });
         };
-        row.appendChild(cb);
+        row.appendChild(slider);
     }
     row.style.top = `${n * cbHeight}px`;
     return row;
@@ -142,10 +167,7 @@ function handleUpdate(offset, base64Data) {
     let i = offset;
     for (let j = 0; j < data.length; j++) {
         const byte = data.charCodeAt(j);
-        for (let k = 0; k < 8; k++) {
-            setBit(i, (byte & (1 << k)) !== 0);
-            i++;
-        }
+        setByte(i + j, byte);
     }
 }
 let eventSourceStart = 0;
