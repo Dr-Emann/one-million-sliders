@@ -64,6 +64,10 @@ function onResize() {
     cbHeight = item.clientHeight;
     content.removeChild(item);
     numCols = Math.floor(visibleWidth / cbWidth);
+    // Ensure at least 4 columns
+    if (numCols < 4) {
+        numCols = 4;
+    }
     numRows = Math.ceil(1000000 / numCols);
     fullHeight = numRows * cbHeight;
     content.style.height = `${fullHeight}px`;
