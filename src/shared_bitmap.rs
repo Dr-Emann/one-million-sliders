@@ -13,7 +13,7 @@ pub const CHUNK_BYTES: usize = 128;
 pub const CHUNK_BITS: usize = CHUNK_BYTES * 8;
 
 const TOTAL_BITS: usize = crate::NUM_CHECKBOXES;
-const NUM_CHUNKS: usize = TOTAL_BITS / CHUNK_BITS;
+const NUM_CHUNKS: usize = (TOTAL_BITS + CHUNK_BITS - 1) / CHUNK_BITS;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
