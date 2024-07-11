@@ -103,7 +103,7 @@ async fn range_updates(
     }
     let start_chunk = (range.start / CHUNK_BITS as u64) as usize;
     let end_chunk = ((range.end + CHUNK_BITS as u64 - 1) / CHUNK_BITS as u64) as usize;
-    if (end_chunk - start_chunk) * CHUNK_BITS > 10_000 {
+    if (end_chunk - start_chunk) * CHUNK_BITS > 90_000 {
         return Err((
             StatusCode::BAD_REQUEST,
             "Cannot listen to such a large range",
@@ -138,7 +138,7 @@ async fn range_updates(
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     interval.reset_immediately();
     // This will never be the actual count, so we'll always send the first update
-    let mut last_count = u64::MAX;
+    let mut last_count = f64::NAN;
     let mut int_buffer = itoa::Buffer::new();
     struct LogOnDisconnect(Span);
     impl Drop for LogOnDisconnect {
@@ -151,11 +151,11 @@ async fn range_updates(
         tokio_stream::wrappers::IntervalStream::new(interval).filter_map(move |_tick| {
             // Move the logger into the closure to ensure it's dropped when the stream ends
             let _log_on_disconnect = &log_on_disconnect;
-            let count = state.bitmap.count();
+            let count = state.bitmap.average();
             if count != last_count {
                 debug!(parent: &span, count, last_count, "going to send a count update");
                 last_count = count;
-                let count_str = int_buffer.format(count);
+                let count_str = &format!("{}", count);
                 Some(sse::Event::default().data(count_str).event("count"))
             } else {
                 None

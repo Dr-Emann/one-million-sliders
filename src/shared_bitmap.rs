@@ -8,6 +8,7 @@ use memmap2::{MmapOptions, MmapRaw};
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use crate::NUM_SLIDERS;
 
 pub const CHUNK_BYTES: usize = 128;
 pub const CHUNK_BITS: usize = CHUNK_BYTES * 8;
@@ -77,7 +78,8 @@ impl Segment {
 pub struct SharedBitmap {
     segments: Box<[Segment; NUM_CHUNKS]>,
     map: MmapRaw,
-    count: AtomicU64,
+    bits_set: AtomicU64,
+    bytes_sum: AtomicU64,
 }
 
 impl SharedBitmap {
@@ -97,6 +99,7 @@ impl SharedBitmap {
 
         let map = unsafe { MmapOptions::new().map_mut(&file)? };
         let count = map.iter().map(|&byte| byte.count_ones() as u64).sum();
+        let bytes_sum = map.iter().copied().map(u64::from).sum();
 
         let segment = |i| {
             let slice = &map[i * CHUNK_BYTES..][..CHUNK_BYTES];
@@ -108,7 +111,8 @@ impl SharedBitmap {
         Ok(Self {
             segments,
             map: MmapRaw::from(map),
-            count: AtomicU64::new(count),
+            bits_set: AtomicU64::new(count),
+            bytes_sum: AtomicU64::new(bytes_sum),
         })
     }
 
@@ -159,10 +163,13 @@ impl SharedBitmap {
             chunk.0[inner_idx] = byte;
             notify.notify_one();
         });
-        let diff = byte.count_ones() as i32 - prev.count_ones() as i32;
+        let bit_diff = byte.count_ones() as i32 - prev.count_ones() as i32;
+        let diff = byte as i32 - prev as i32;
         // use `as u64` which will sign extend, adding a sign extended negative value will act the
         // same as subtracting
-        self.count
+        self.bits_set
+            .fetch_add(bit_diff as u64, std::sync::atomic::Ordering::Relaxed);
+        self.bytes_sum
             .fetch_add(diff as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -173,7 +180,7 @@ impl SharedBitmap {
             notify.notify_one();
         });
         let diff = if added { 1 } else { -1 };
-        self.count
+        self.bits_set
             .fetch_add(diff as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -182,7 +189,12 @@ impl SharedBitmap {
     }
 
     pub fn count(&self) -> u64 {
-        self.count.load(std::sync::atomic::Ordering::Relaxed)
+        self.bits_set.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    
+    pub fn average(&self) -> f64 {
+        let sum = self.bytes_sum.load(std::sync::atomic::Ordering::Relaxed);
+        sum as f64 / NUM_SLIDERS as f64 / 255.0
     }
 }
 

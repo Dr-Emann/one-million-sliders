@@ -160,11 +160,12 @@ function makeRow(n) {
 }
 function updateCount(count) {
     const countEl = document.getElementById('count');
-    countEl.textContent = count.toString();
+    countEl.textContent = `${count * 100}%`;
 }
 function handleUpdate(offset, base64Data) {
     const data = atob(base64Data);
-    let i = offset;
+    // Offset is in bits, so divide by 8 to get bytes
+    let i = offset / 8;
     for (let j = 0; j < data.length; j++) {
         const byte = data.charCodeAt(j);
         setByte(i + j, byte);
@@ -174,12 +175,13 @@ let eventSourceStart = 0;
 let eventSourceEnd = 0;
 function createEventSource() {
     eventSource === null || eventSource === void 0 ? void 0 : eventSource.close();
-    eventSource = new EventSource(`updates?start=${eventSourceStart}&end=${eventSourceEnd}`);
+    // Units are in bytes now
+    eventSource = new EventSource(`updates?start=${eventSourceStart * 8}&end=${eventSourceEnd * 8}`);
     eventSource.addEventListener("error", () => {
         eventSource === null || eventSource === void 0 ? void 0 : eventSource.close();
         setTimeout(createEventSource, 500);
     });
-    eventSource.addEventListener("count", (ev) => updateCount(parseInt(ev.data)));
+    eventSource.addEventListener("count", (ev) => updateCount(parseFloat(ev.data)));
     eventSource.addEventListener("update", (ev) => handleUpdate(parseInt(ev.lastEventId), ev.data));
 }
 let eventSource = null;
