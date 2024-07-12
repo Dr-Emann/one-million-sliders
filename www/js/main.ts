@@ -181,9 +181,10 @@ function makeRow(n: number): HTMLDivElement {
     return row;
 }
 
-function updateCount(count: number): void {
-    const countEl = document.getElementById('count')!;
-    countEl.textContent = `${count * 100}%`
+function updateSum(sum: number): void {
+    const countEl = document.getElementById('avg')!;
+    const percent = sum / 255 / NUM_VALUES * 100;
+    countEl.textContent = `${percent.toFixed(7)}%`
 }
 
 function handleUpdate(offset: number, base64Data: string): void {
@@ -206,7 +207,7 @@ function createEventSource(): void {
         eventSource?.close()
         setTimeout(createEventSource, 500)
     })
-    eventSource.addEventListener("count", (ev) => updateCount(parseFloat(ev.data)))
+    eventSource.addEventListener("sum", (ev) => updateSum(parseFloat(ev.data)))
     eventSource.addEventListener("update", (ev) => handleUpdate(parseInt(ev.lastEventId), ev.data))
 }
 

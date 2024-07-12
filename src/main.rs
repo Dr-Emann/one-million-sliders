@@ -137,8 +137,8 @@ async fn range_updates(
     let mut interval = tokio::time::interval(Duration::from_millis(250));
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     interval.reset_immediately();
-    // This will never be the actual count, so we'll always send the first update
-    let mut last_count = f64::NAN;
+    // This will never be the actual sum, so we'll always send the first update
+    let mut last_sum = u64::MAX;
     let mut int_buffer = itoa::Buffer::new();
     struct LogOnDisconnect(Span);
     impl Drop for LogOnDisconnect {
@@ -151,12 +151,12 @@ async fn range_updates(
         tokio_stream::wrappers::IntervalStream::new(interval).filter_map(move |_tick| {
             // Move the logger into the closure to ensure it's dropped when the stream ends
             let _log_on_disconnect = &log_on_disconnect;
-            let count = state.bitmap.average();
-            if count != last_count {
-                debug!(parent: &span, count, last_count, "going to send a count update");
-                last_count = count;
-                let count_str = &format!("{:.9}", count);
-                Some(sse::Event::default().data(count_str).event("count"))
+            let sum = state.bitmap.sum();
+            if sum != last_sum {
+                debug!(parent: &span, sum, last_sum, "going to send a sum update");
+                last_sum = sum;
+                let sum_str = int_buffer.format(sum);
+                Some(sse::Event::default().data(sum_str).event("sum"))
             } else {
                 None
             }

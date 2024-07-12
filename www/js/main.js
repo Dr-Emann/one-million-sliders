@@ -162,9 +162,10 @@ function makeRow(n) {
     row.style.top = `${n * cbHeight}px`;
     return row;
 }
-function updateCount(count) {
-    const countEl = document.getElementById('count');
-    countEl.textContent = `${count * 100}%`;
+function updateSum(sum) {
+    const countEl = document.getElementById('avg');
+    const percent = sum / 255 / NUM_VALUES * 100;
+    countEl.textContent = `${percent.toFixed(7)}%`;
 }
 function handleUpdate(offset, base64Data) {
     const data = atob(base64Data);
@@ -185,7 +186,7 @@ function createEventSource() {
         eventSource === null || eventSource === void 0 ? void 0 : eventSource.close();
         setTimeout(createEventSource, 500);
     });
-    eventSource.addEventListener("count", (ev) => updateCount(parseFloat(ev.data)));
+    eventSource.addEventListener("sum", (ev) => updateSum(parseFloat(ev.data)));
     eventSource.addEventListener("update", (ev) => handleUpdate(parseInt(ev.lastEventId), ev.data));
 }
 let eventSource = null;

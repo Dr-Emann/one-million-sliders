@@ -191,10 +191,9 @@ impl SharedBitmap {
     pub fn count(&self) -> u64 {
         self.bits_set.load(std::sync::atomic::Ordering::Relaxed)
     }
-    
-    pub fn average(&self) -> f64 {
-        let sum = self.bytes_sum.load(std::sync::atomic::Ordering::Relaxed);
-        sum as f64 / NUM_SLIDERS as f64 / 255.0
+
+    pub fn sum(&self) -> u64 {
+        self.bytes_sum.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
