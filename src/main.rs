@@ -155,7 +155,7 @@ async fn range_updates(
             if count != last_count {
                 debug!(parent: &span, count, last_count, "going to send a count update");
                 last_count = count;
-                let count_str = &format!("{:.7}", count);
+                let count_str = &format!("{:.9}", count);
                 Some(sse::Event::default().data(count_str).event("count"))
             } else {
                 None
