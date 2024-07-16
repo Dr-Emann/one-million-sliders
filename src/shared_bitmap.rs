@@ -1,14 +1,13 @@
 use std::fs::File;
-use std::io;
+use std::{io, mem};
 use std::path::Path;
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, AtomicU8};
+use std::sync::Arc;
 
 use memmap2::{MmapOptions, MmapRaw};
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use crate::NUM_SLIDERS;
 
 pub const CHUNK_BYTES: usize = 128;
 pub const CHUNK_BITS: usize = CHUNK_BYTES * 8;
@@ -16,9 +15,8 @@ pub const CHUNK_BITS: usize = CHUNK_BYTES * 8;
 const TOTAL_BITS: usize = crate::NUM_CHECKBOXES;
 const NUM_CHUNKS: usize = (TOTAL_BITS + CHUNK_BITS - 1) / CHUNK_BITS;
 
-#[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct Chunk(pub [u8; CHUNK_BYTES]);
+struct Chunk([AtomicU8; CHUNK_BYTES]);
 
 impl Default for Chunk {
     fn default() -> Self {
@@ -28,15 +26,25 @@ impl Default for Chunk {
 
 impl Chunk {
     pub const fn new() -> Self {
-        Self([0; CHUNK_BYTES])
+        Self([const { AtomicU8::new(0) }; CHUNK_BYTES])
     }
 
     // Returns if the byte was added, otherwise, it was removed
-    pub fn toggle(&mut self, index: u16) -> bool {
+    pub fn toggle(&self, index: u16) -> bool {
         let (byte_index, mask) = Self::index_mask(index);
-        let byte = &mut self.0[byte_index];
-        *byte ^= mask;
-        (*byte & mask) != 0
+        let byte = &self.0[byte_index];
+        let orig = byte.fetch_xor(mask, std::sync::atomic::Ordering::Relaxed);
+        (orig & mask) != 0
+    }
+
+    pub fn set_byte(&self, index: usize, byte: u8) -> u8 {
+        self.0[index].swap(byte, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn load(&self, dst: &mut [u8; CHUNK_BYTES]) {
+        for (out, byte) in dst.iter_mut().zip(&self.0) {
+            *out = byte.load(std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     #[inline]
@@ -49,28 +57,24 @@ impl Chunk {
     }
 }
 
-#[repr(align(128))]
 struct Segment {
-    lock: Mutex<()>,
     notify_changed: Notify,
-    watch: watch::Sender<Chunk>,
+    watch: watch::Sender<[u8; CHUNK_BYTES]>,
 }
 
 impl Default for Segment {
     fn default() -> Self {
         Self {
-            lock: Mutex::new(()),
             notify_changed: Notify::new(),
-            watch: watch::Sender::new(Chunk::new()),
+            watch: watch::Sender::new([0; CHUNK_BYTES]),
         }
     }
 }
 impl Segment {
     fn from_bytes(current_slice: &[u8; CHUNK_BYTES]) -> Self {
         Self {
-            lock: Mutex::new(()),
             notify_changed: Notify::new(),
-            watch: watch::Sender::new(Chunk(*current_slice)),
+            watch: watch::Sender::new(*current_slice),
         }
     }
 }
@@ -129,40 +133,34 @@ impl SharedBitmap {
                         next_possible_update =
                             Instant::now() + std::time::Duration::from_millis(100);
 
-                        let chunk = shared.with_chunk(i, |chunk, _| *chunk);
-                        segment.watch.send_modify(|c| *c = chunk);
+                        let chunk = &shared.chunks()[i];
+                        segment.watch.send_modify(|c| chunk.load(c));
                     }
                 })
             })
             .collect();
         SharedBitmapRunningTasks { tasks }
     }
-
-    fn with_chunk<F, O>(&self, index: usize, f: F) -> O
-    where
-        F: FnOnce(&mut Chunk, &Notify) -> O,
-    {
+    
+    fn chunks(&self) -> &[Chunk] {
+        debug_assert_eq!(self.map.len(), NUM_CHUNKS * mem::size_of::<Chunk>());
+        
+        unsafe { std::slice::from_raw_parts(self.map.as_ptr().cast::<Chunk>(), NUM_CHUNKS) }
+    }
+    
+    fn chunk_notify(&self, index: usize) -> (&Chunk, &Notify) {
+        let chunk = &self.chunks()[index];
         let segment = &self.segments[index];
-        let _guard = segment.lock.lock().unwrap();
-        // SAFETY: The above guard ensures that only one segment has this chunk at a time
-        let chunk = unsafe {
-            &mut *self
-                .map
-                .as_mut_ptr()
-                .add(index * CHUNK_BYTES)
-                .cast::<Chunk>()
-        };
-        f(chunk, &segment.notify_changed)
+        (chunk, &segment.notify_changed)
     }
 
     pub fn set_byte(&self, index: usize, byte: u8) {
-        let mut prev = 0;
-        self.with_chunk(index / CHUNK_BYTES, |chunk, notify| {
-            let inner_idx = index % CHUNK_BYTES;
-            prev = chunk.0[inner_idx];
-            chunk.0[inner_idx] = byte;
-            notify.notify_one();
-        });
+        let (chunk, notify) = self.chunk_notify(index / CHUNK_BYTES);
+        let inner_idx = index % CHUNK_BYTES;
+        
+        let prev = chunk.set_byte(inner_idx, byte);
+        notify.notify_one();
+        
         let bit_diff = byte.count_ones() as i32 - prev.count_ones() as i32;
         let diff = byte as i32 - prev as i32;
         // use `as u64` which will sign extend, adding a sign extended negative value will act the
@@ -174,17 +172,15 @@ impl SharedBitmap {
     }
 
     pub fn toggle(&self, bit_index: usize) {
-        let mut added = false;
-        self.with_chunk(bit_index / CHUNK_BITS, |chunk, notify| {
-            added = chunk.toggle((bit_index % CHUNK_BITS) as u16);
-            notify.notify_one();
-        });
-        let diff = if added { 1 } else { -1 };
+        let (chunk, notify) = self.chunk_notify(bit_index / CHUNK_BITS);
+        let prev_bit = chunk.toggle((bit_index % CHUNK_BITS) as u16);
+        notify.notify_one();
+        let diff = if prev_bit { -1 } else { 1 };
         self.bits_set
             .fetch_add(diff as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub fn watch(&self, segment_index: usize) -> watch::Receiver<Chunk> {
+    pub fn watch(&self, segment_index: usize) -> watch::Receiver<[u8; CHUNK_BYTES]> {
         self.segments[segment_index].watch.subscribe()
     }
 

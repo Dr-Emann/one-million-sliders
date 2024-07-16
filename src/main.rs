@@ -123,7 +123,7 @@ async fn range_updates(
     let mut i_buffer = itoa::Buffer::new();
     let stream = stream::select_all(watches).map(move |(i, chunk)| {
         let len = BASE64_STANDARD_NO_PAD
-            .encode_slice(chunk.0, &mut b64_chunk)
+            .encode_slice(chunk, &mut b64_chunk)
             .expect("a chunk is guaranteed to fit in the available space");
         // SAFETY: base64 encoding is guaranteed to be valid UTF-8
         let b64_chunk: &str = unsafe { std::str::from_utf8_unchecked(&b64_chunk[..len]) };
