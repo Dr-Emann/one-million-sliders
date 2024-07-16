@@ -41,7 +41,7 @@ struct SharedState {
 impl SharedState {
     fn new() -> io::Result<Self> {
         let bitmap = Arc::new(SharedBitmap::load_or_create("bitmap.bin")?);
-        let tasks = Arc::new(bitmap.run_tasks());
+        let tasks = Arc::new(bitmap.spawn_tasks());
 
         Ok(Self {
             bitmap,

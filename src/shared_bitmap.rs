@@ -1,9 +1,10 @@
 use std::fs::File;
-use std::{io, mem};
+use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicU8};
 use std::sync::Arc;
-
+use std::{io, mem};
+use std::convert::Infallible;
 use memmap2::{MmapOptions, MmapRaw};
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
@@ -120,34 +121,37 @@ impl SharedBitmap {
         })
     }
 
-    pub fn run_tasks(self: &Arc<Self>) -> SharedBitmapRunningTasks {
-        let tasks: Vec<_> = (0..self.segments.len())
-            .map(|i| {
-                let shared = Arc::clone(self);
-                tokio::spawn(async move {
-                    let segment = &shared.segments[i];
-                    let mut next_possible_update = Instant::now();
-                    loop {
-                        segment.notify_changed.notified().await;
-                        tokio::time::sleep_until(next_possible_update).await;
-                        next_possible_update =
-                            Instant::now() + std::time::Duration::from_millis(100);
+    pub fn run_tasks<'a>(
+        self: &'a Arc<Self>,
+    ) -> impl Iterator<Item = impl Future<Output = Infallible>> + 'a {
+        (0..self.segments.len()).map(|i| {
+            let shared = Arc::clone(self);
+            async move {
+                let segment = &shared.segments[i];
+                let mut next_possible_update = Instant::now();
+                loop {
+                    segment.notify_changed.notified().await;
+                    tokio::time::sleep_until(next_possible_update).await;
+                    next_possible_update = Instant::now() + std::time::Duration::from_millis(100);
 
-                        let chunk = &shared.chunks()[i];
-                        segment.watch.send_modify(|c| chunk.load(c));
-                    }
-                })
-            })
-            .collect();
+                    let chunk = &shared.chunks()[i];
+                    segment.watch.send_modify(|c| chunk.load(c));
+                }
+            }
+        })
+    }
+    
+    pub fn spawn_tasks(self: &Arc<Self>) -> SharedBitmapRunningTasks {
+        let tasks = self.run_tasks().map(tokio::spawn).collect();
         SharedBitmapRunningTasks { tasks }
     }
-    
+
     fn chunks(&self) -> &[Chunk] {
         debug_assert_eq!(self.map.len(), NUM_CHUNKS * mem::size_of::<Chunk>());
-        
+
         unsafe { std::slice::from_raw_parts(self.map.as_ptr().cast::<Chunk>(), NUM_CHUNKS) }
     }
-    
+
     fn chunk_notify(&self, index: usize) -> (&Chunk, &Notify) {
         let chunk = &self.chunks()[index];
         let segment = &self.segments[index];
@@ -157,10 +161,10 @@ impl SharedBitmap {
     pub fn set_byte(&self, index: usize, byte: u8) {
         let (chunk, notify) = self.chunk_notify(index / CHUNK_BYTES);
         let inner_idx = index % CHUNK_BYTES;
-        
+
         let prev = chunk.set_byte(inner_idx, byte);
         notify.notify_one();
-        
+
         let bit_diff = byte.count_ones() as i32 - prev.count_ones() as i32;
         let diff = byte as i32 - prev as i32;
         // use `as u64` which will sign extend, adding a sign extended negative value will act the
@@ -194,7 +198,7 @@ impl SharedBitmap {
 }
 
 pub struct SharedBitmapRunningTasks {
-    tasks: Vec<JoinHandle<()>>,
+    tasks: Vec<JoinHandle<Infallible>>,
 }
 
 impl Drop for SharedBitmapRunningTasks {
