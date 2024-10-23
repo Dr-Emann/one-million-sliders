@@ -77,7 +77,11 @@ async fn main() {
         );
     let app = app.with_state(SharedState::new().unwrap());
 
-    let listener = TcpListener::bind((Ipv6Addr::UNSPECIFIED, 8000))
+    let port: u16 = std::env::args()
+        .nth(1)
+        .and_then(|port_str| port_str.parse().ok())
+        .unwrap_or(8000);
+    let listener = TcpListener::bind((Ipv6Addr::UNSPECIFIED, port))
         .await
         .unwrap();
 
