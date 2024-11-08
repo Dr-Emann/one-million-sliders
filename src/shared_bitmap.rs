@@ -1,11 +1,11 @@
+use memmap2::{MmapOptions, MmapRaw};
+use std::convert::Infallible;
 use std::fs::File;
 use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicU8};
 use std::sync::Arc;
 use std::{io, mem};
-use std::convert::Infallible;
-use memmap2::{MmapOptions, MmapRaw};
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -140,7 +140,7 @@ impl SharedBitmap {
             }
         })
     }
-    
+
     pub fn spawn_tasks(self: &Arc<Self>) -> SharedBitmapRunningTasks {
         let tasks = self.run_tasks().map(tokio::spawn).collect();
         SharedBitmapRunningTasks { tasks }
