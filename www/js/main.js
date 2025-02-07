@@ -109,7 +109,8 @@ function doScroll(force) {
         }
     }
     const roundedFirstCheckbox = (((newFirstRenderedRow * numCols) / 512) | 0) * 512;
-    const roundedLastCheckbox = (((newLastRenderedRow * numCols + 511) / 512) | 0) * 512;
+    const roundedLastCheckboxUnclamped = (((newLastRenderedRow * numCols + 511) / 512) | 0) * 512;
+    const roundedLastCheckbox = Math.min(NUM_VALUES, roundedLastCheckboxUnclamped);
     if (roundedFirstCheckbox !== eventSourceStart || roundedLastCheckbox !== eventSourceEnd) {
         eventSourceStart = roundedFirstCheckbox;
         eventSourceEnd = roundedLastCheckbox;
