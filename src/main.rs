@@ -13,6 +13,7 @@ use base64::prelude::BASE64_STANDARD_NO_PAD;
 use base64::Engine;
 use futures::{stream, Stream};
 use listenfd::ListenFd;
+use std::path::Path as FsPath;
 use tokio::net::TcpListener;
 use tokio::time::MissedTickBehavior;
 use tokio_stream::StreamExt;
@@ -27,6 +28,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::shared_bitmap::{SharedBitmap, SharedBitmapRunningTasks, CHUNK_BITS, CHUNK_BYTES};
 
+mod log;
 mod shared_bitmap;
 
 // One byte per slider
@@ -40,8 +42,12 @@ struct SharedState {
 }
 
 impl SharedState {
-    fn new() -> io::Result<Self> {
-        let bitmap = Arc::new(SharedBitmap::load_or_create("bitmap.bin")?);
+    fn new(bitmap_path: impl AsRef<FsPath>, log_path: impl AsRef<FsPath>) -> io::Result<Self> {
+        Self::_new(bitmap_path.as_ref(), log_path.as_ref())
+    }
+
+    fn _new(bitmap_path: &FsPath, log_path: &FsPath) -> io::Result<Self> {
+        let bitmap = Arc::new(SharedBitmap::load_or_create(bitmap_path, log_path)?);
         let tasks = Arc::new(bitmap.spawn_tasks());
 
         Ok(Self {
@@ -76,7 +82,7 @@ async fn main() {
                         .br(true),
                 ),
         );
-    let app = app.with_state(SharedState::new().unwrap());
+    let app = app.with_state(SharedState::new("bitmap.bin", "log.bin").unwrap());
 
     let port: u16 = std::env::args()
         .nth(1)

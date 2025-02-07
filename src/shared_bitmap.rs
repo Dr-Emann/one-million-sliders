@@ -10,6 +10,8 @@ use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use crate::log::{self, Log};
+
 pub const CHUNK_BYTES: usize = 128;
 pub const CHUNK_BITS: usize = CHUNK_BYTES * 8;
 
@@ -85,24 +87,29 @@ pub struct SharedBitmap {
     map: MmapRaw,
     bits_set: AtomicU64,
     bytes_sum: AtomicU64,
+    log: Log,
 }
 
 impl SharedBitmap {
-    pub fn load_or_create<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        Self::_load_or_create(path.as_ref())
+    pub fn load_or_create(
+        bitmap_path: impl AsRef<Path>,
+        log_path: impl AsRef<Path>,
+    ) -> io::Result<Self> {
+        Self::_load_or_create(bitmap_path.as_ref(), log_path.as_ref())
     }
 
-    fn _load_or_create(path: &Path) -> io::Result<Self> {
-        let file = File::options()
+    fn _load_or_create(bitmap_path: &Path, log_path: &Path) -> io::Result<Self> {
+        let bitmap_file = File::options()
             .write(true)
             .read(true)
             .create(true)
             .truncate(false)
-            .open(path)?;
+            .open(bitmap_path)?;
+        bitmap_file.set_len(NUM_CHUNKS as u64 * CHUNK_BYTES as u64)?;
 
-        file.set_len(NUM_CHUNKS as u64 * CHUNK_BYTES as u64)?;
+        let log = Log::new(log_path)?;
 
-        let map = unsafe { MmapOptions::new().map_mut(&file)? };
+        let map = unsafe { MmapOptions::new().map_mut(&bitmap_file)? };
         let count = map.iter().map(|&byte| byte.count_ones() as u64).sum();
         let bytes_sum = map.iter().copied().map(u64::from).sum();
 
@@ -113,11 +120,13 @@ impl SharedBitmap {
         };
         let segments: Box<[Segment]> = (0..NUM_CHUNKS).map(segment).collect();
         let segments = segments.try_into().map_err(|_| ()).unwrap();
+
         Ok(Self {
             segments,
             map: MmapRaw::from(map),
             bits_set: AtomicU64::new(count),
             bytes_sum: AtomicU64::new(bytes_sum),
+            log,
         })
     }
 
@@ -164,6 +173,10 @@ impl SharedBitmap {
 
         let prev = chunk.set_byte(inner_idx, byte);
         notify.notify_one();
+        self.log.log_msg(log::Message::SetByte {
+            offset: index as u32,
+            value: byte,
+        });
 
         let bit_diff = byte.count_ones() as i32 - prev.count_ones() as i32;
         let diff = byte as i32 - prev as i32;
@@ -179,6 +192,9 @@ impl SharedBitmap {
         let (chunk, notify) = self.chunk_notify(bit_index / CHUNK_BITS);
         let prev_bit = chunk.toggle((bit_index % CHUNK_BITS) as u16);
         notify.notify_one();
+        self.log.log_msg(log::Message::Toggle {
+            offset: bit_index as u32,
+        });
         let diff = if prev_bit { -1 } else { 1 };
         self.bits_set
             .fetch_add(diff as u64, std::sync::atomic::Ordering::Relaxed);
