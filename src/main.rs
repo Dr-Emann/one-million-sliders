@@ -12,6 +12,7 @@ use axum::Router;
 use base64::prelude::BASE64_STANDARD_NO_PAD;
 use base64::Engine;
 use futures::{stream, Stream};
+use listenfd::ListenFd;
 use tokio::net::TcpListener;
 use tokio::time::MissedTickBehavior;
 use tokio_stream::StreamExt;
@@ -81,11 +82,20 @@ async fn main() {
         .nth(1)
         .and_then(|port_str| port_str.parse().ok())
         .unwrap_or(8000);
-    let listener = TcpListener::bind((Ipv6Addr::UNSPECIFIED, port))
-        .await
-        .unwrap();
+    let listener = listener_socket(port).await.unwrap();
 
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn listener_socket(port: u16) -> io::Result<TcpListener> {
+    let mut listenfd = ListenFd::from_env();
+    match listenfd
+        .take_tcp_listener(0)
+        .expect("passed listener is not a TCP listener")
+    {
+        Some(std_listener) => TcpListener::from_std(std_listener),
+        None => TcpListener::bind((Ipv6Addr::UNSPECIFIED, port)).await,
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Debug)]
