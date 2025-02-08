@@ -100,7 +100,10 @@ async fn main() {
         _ = shutdown_fut() => {
         }
     }
+
+    tracing::info!("server shut down, flushing log");
     Arc::into_inner(state.bitmap).unwrap().finish();
+    tracing::info!("exiting");
 }
 
 async fn shutdown_fut() {
@@ -120,8 +123,14 @@ async fn listener_socket(port: u16) -> io::Result<TcpListener> {
         .take_tcp_listener(0)
         .expect("passed listener is not a TCP listener")
     {
-        Some(std_listener) => TcpListener::from_std(std_listener),
-        None => TcpListener::bind((Ipv6Addr::UNSPECIFIED, port)).await,
+        Some(std_listener) => {
+            tracing::info!("using passed tcp listener");
+            TcpListener::from_std(std_listener)
+        }
+        None => {
+            tracing::info!("binding to port={port} directly");
+            TcpListener::bind((Ipv6Addr::UNSPECIFIED, port)).await
+        }
     }
 }
 
