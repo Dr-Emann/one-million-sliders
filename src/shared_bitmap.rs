@@ -3,9 +3,9 @@ use std::convert::Infallible;
 use std::fs::File;
 use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicU8};
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize};
 use std::sync::Arc;
-use std::{io, mem};
+use std::{io, mem, slice};
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -19,7 +19,7 @@ const TOTAL_BITS: usize = crate::NUM_CHECKBOXES;
 const NUM_CHUNKS: usize = TOTAL_BITS.div_ceil(CHUNK_BITS);
 
 #[repr(transparent)]
-struct Chunk([AtomicU8; CHUNK_BYTES]);
+pub struct Chunk([AtomicU8; CHUNK_BYTES]);
 
 impl Default for Chunk {
     fn default() -> Self {
@@ -45,8 +45,34 @@ impl Chunk {
     }
 
     pub fn load(&self, dst: &mut [u8; CHUNK_BYTES]) {
-        for (out, byte) in dst.iter_mut().zip(&self.0) {
-            *out = byte.load(std::sync::atomic::Ordering::Relaxed);
+        Self::load_chunks(std::array::from_ref(self), dst);
+    }
+
+    pub fn load_chunks(chunks: &[Chunk], dst: &mut [u8]) {
+        assert_eq!(dst.len(), chunks.len() * CHUNK_BYTES);
+
+        let chunks_bytes = unsafe {
+            slice::from_raw_parts(
+                chunks.as_ptr().cast::<AtomicU8>(),
+                chunks.len() * size_of::<Chunk>(),
+            )
+        };
+        let (prefix, aligned, suffix) = unsafe { chunks_bytes.align_to::<AtomicUsize>() };
+        let (prefix_dst, rest) = dst.split_at_mut(prefix.len());
+        let (aligned_dst, suffix_dxt) = rest.split_at_mut(aligned.len() * size_of::<usize>());
+
+        for (d, s) in prefix_dst.iter_mut().zip(prefix.iter()) {
+            *d = s.load(std::sync::atomic::Ordering::Relaxed);
+        }
+        for (d, s) in aligned_dst
+            .chunks_exact_mut(size_of::<usize>())
+            .zip(aligned)
+        {
+            let s = s.load(std::sync::atomic::Ordering::Relaxed);
+            d.copy_from_slice(&s.to_ne_bytes());
+        }
+        for (d, s) in suffix_dxt.iter_mut().zip(suffix.iter()) {
+            *d = s.load(std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -143,7 +169,7 @@ impl SharedBitmap {
                     tokio::time::sleep_until(next_possible_update).await;
                     next_possible_update = Instant::now() + std::time::Duration::from_millis(100);
 
-                    let chunk = &shared.chunks()[i];
+                    let chunk = &shared.raw_chunks()[i];
                     segment.watch.send_modify(|c| chunk.load(c));
                 }
             }
@@ -155,14 +181,14 @@ impl SharedBitmap {
         SharedBitmapRunningTasks { tasks }
     }
 
-    fn chunks(&self) -> &[Chunk] {
+    pub fn raw_chunks(&self) -> &[Chunk] {
         debug_assert_eq!(self.map.len(), NUM_CHUNKS * mem::size_of::<Chunk>());
 
         unsafe { std::slice::from_raw_parts(self.map.as_ptr().cast::<Chunk>(), NUM_CHUNKS) }
     }
 
     fn chunk_notify(&self, index: usize) -> (&Chunk, &Notify) {
-        let chunk = &self.chunks()[index];
+        let chunk = &self.raw_chunks()[index];
         let segment = &self.segments[index];
         (chunk, &segment.notify_changed)
     }

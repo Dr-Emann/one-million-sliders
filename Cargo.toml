@@ -28,3 +28,8 @@ tower-http = { version = "0.5.2", features = [
     "compression-br",
     "trace",
 ] }
+
+[profile.release]
+opt-level = 3     # Maximum optimization
+lto = true        # Enable Link Time Optimization
+codegen-units = 1 # Reduce parallel code generation units to increase optimization

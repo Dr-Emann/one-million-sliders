@@ -8,7 +8,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{sse, Sse};
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Json, Router};
 use base64::prelude::BASE64_STANDARD_NO_PAD;
 use base64::Engine;
 use futures::{stream, Stream};
@@ -65,6 +65,7 @@ async fn main() {
         .init();
 
     let app = Router::new()
+        .route("/snapshot", get(range_snapshot))
         .route("/updates", get(range_updates))
         .route("/toggle/:idx", post(toggle))
         .route("/set_byte/:idx/:value", post(set_byte))
@@ -104,17 +105,21 @@ async fn listener_socket(port: u16) -> io::Result<TcpListener> {
     }
 }
 
+const MAX_RANGE_BITS: usize = NUM_CHECKBOXES.next_multiple_of(CHUNK_BITS);
+
 #[derive(serde::Deserialize, serde::Serialize, Debug)]
 struct Range {
     start: u64,
     end: u64,
 }
 
-#[tracing::instrument(skip(state, range), fields(start=range.start, end=range.end))]
-async fn range_updates(
-    State(state): State<SharedState>,
-    Query(range): Query<Range>,
-) -> axum::response::Result<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
+#[derive(serde::Deserialize, serde::Serialize, Debug)]
+struct Snapshot {
+    start: u64,
+    bits: String,
+}
+
+fn range_validate(range: &Range) -> Result<(usize, usize), axum::response::ErrorResponse> {
     if range.start > range.end {
         return Err((StatusCode::BAD_REQUEST, "start must be less than end").into());
     }
@@ -123,13 +128,52 @@ async fn range_updates(
     }
     let start_chunk = (range.start / CHUNK_BITS as u64) as usize;
     let end_chunk = range.end.div_ceil(CHUNK_BITS as u64) as usize;
-    if (end_chunk - start_chunk) * CHUNK_BITS > 90_000 {
+    if (end_chunk - start_chunk) * CHUNK_BITS > MAX_RANGE_BITS {
         return Err((
             StatusCode::BAD_REQUEST,
             "Cannot listen to such a large range",
         )
             .into());
     }
+    Ok((start_chunk, end_chunk))
+}
+
+#[tracing::instrument(skip(state, range), fields(start=range.start, end=range.end))]
+async fn range_snapshot(
+    State(state): State<SharedState>,
+    Query(range): Query<Range>,
+) -> axum::response::Result<Json<Snapshot>> {
+    use std::io::Write;
+
+    let (start_chunk, end_chunk) = range_validate(&range)?;
+    let num_bytes = (end_chunk - start_chunk) * CHUNK_BYTES;
+    let buf = Vec::with_capacity(num_bytes * 4 / 3 + 4);
+    let mut writer = base64::write::EncoderWriter::new(buf, &BASE64_STANDARD_NO_PAD);
+
+    let chunks = &state.bitmap.raw_chunks()[start_chunk..end_chunk];
+    let mut chunk_buf = [0; CHUNK_BYTES];
+    for chunk in chunks {
+        chunk.load(&mut chunk_buf);
+        writer.write_all(&chunk_buf).unwrap();
+    }
+    let b64_output = writer
+        .finish()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // SAFETY: base64 encoding is guaranteed to be valid UTF-8
+    let b64_output = unsafe { String::from_utf8_unchecked(b64_output) };
+
+    Ok(Json(Snapshot {
+        start: range.start,
+        bits: b64_output,
+    }))
+}
+
+#[tracing::instrument(skip(state, range), fields(start=range.start, end=range.end))]
+async fn range_updates(
+    State(state): State<SharedState>,
+    Query(range): Query<Range>,
+) -> axum::response::Result<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
+    let (start_chunk, end_chunk) = range_validate(&range)?;
 
     let span = Span::current();
     let watches = (start_chunk..end_chunk).map(|i| {
