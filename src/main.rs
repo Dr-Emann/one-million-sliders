@@ -122,7 +122,7 @@ async fn range_updates(
         return Err((StatusCode::BAD_REQUEST, "end too large").into());
     }
     let start_chunk = (range.start / CHUNK_BITS as u64) as usize;
-    let end_chunk = ((range.end + CHUNK_BITS as u64 - 1) / CHUNK_BITS as u64) as usize;
+    let end_chunk = range.end.div_ceil(CHUNK_BITS as u64) as usize;
     if (end_chunk - start_chunk) * CHUNK_BITS > 90_000 {
         return Err((
             StatusCode::BAD_REQUEST,

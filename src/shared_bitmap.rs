@@ -16,7 +16,7 @@ pub const CHUNK_BYTES: usize = 128;
 pub const CHUNK_BITS: usize = CHUNK_BYTES * 8;
 
 const TOTAL_BITS: usize = crate::NUM_CHECKBOXES;
-const NUM_CHUNKS: usize = (TOTAL_BITS + CHUNK_BITS - 1) / CHUNK_BITS;
+const NUM_CHUNKS: usize = TOTAL_BITS.div_ceil(CHUNK_BITS);
 
 #[repr(transparent)]
 struct Chunk([AtomicU8; CHUNK_BYTES]);
@@ -130,9 +130,9 @@ impl SharedBitmap {
         })
     }
 
-    pub fn run_tasks<'a>(
-        self: &'a Arc<Self>,
-    ) -> impl Iterator<Item = impl Future<Output = Infallible>> + 'a {
+    pub fn run_tasks(
+        self: &Arc<Self>,
+    ) -> impl Iterator<Item = impl Future<Output = Infallible>> + '_ {
         (0..self.segments.len()).map(|i| {
             let shared = Arc::clone(self);
             async move {
