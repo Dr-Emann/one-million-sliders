@@ -5,6 +5,7 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize};
 use std::sync::Arc;
+use std::time::SystemTime;
 use std::{io, mem, slice};
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
@@ -200,6 +201,7 @@ impl SharedBitmap {
         let prev = chunk.set_byte(inner_idx, byte);
         notify.notify_one();
         self.log.log_msg(log::Message::SetByte {
+            time: SystemTime::now(),
             offset: index as u32,
             value: byte,
         });
@@ -219,6 +221,7 @@ impl SharedBitmap {
         let prev_bit = chunk.toggle((bit_index % CHUNK_BITS) as u16);
         notify.notify_one();
         self.log.log_msg(log::Message::Toggle {
+            time: SystemTime::now(),
             offset: bit_index as u32,
         });
         let diff = if prev_bit { -1 } else { 1 };
@@ -236,6 +239,10 @@ impl SharedBitmap {
 
     pub fn sum(&self) -> u64 {
         self.bytes_sum.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn finish(self) {
+        self.log.finish();
     }
 }
 

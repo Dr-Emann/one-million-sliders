@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::future::IntoFuture;
 use std::io;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
@@ -83,7 +84,8 @@ async fn main() {
                         .br(true),
                 ),
         );
-    let app = app.with_state(SharedState::new("bitmap.bin", "log.bin").unwrap());
+    let state = SharedState::new("bitmap.bin", "log-with-times.bin").unwrap();
+    let app = app.with_state(state.clone());
 
     let port: u16 = std::env::args()
         .nth(1)
@@ -91,7 +93,25 @@ async fn main() {
         .unwrap_or(8000);
     let listener = listener_socket(port).await.unwrap();
 
-    axum::serve(listener, app).await.unwrap();
+    tokio::select! {
+        res = axum::serve(listener, app).into_future() => {
+            res.unwrap();
+        },
+        _ = shutdown_fut() => {
+        }
+    }
+    Arc::into_inner(state.bitmap).unwrap().finish();
+}
+
+async fn shutdown_fut() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    let mut sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = sigterm.recv() => {},
+    }
 }
 
 async fn listener_socket(port: u16) -> io::Result<TcpListener> {

@@ -1,37 +1,54 @@
 use std::{
     io::{self, BufWriter, Write},
     path::Path,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Message {
-    SetByte { offset: u32, value: u8 },
-    Toggle { offset: u32 },
+    SetByte {
+        time: SystemTime,
+        offset: u32,
+        value: u8,
+    },
+    Toggle {
+        time: SystemTime,
+        offset: u32,
+    },
 }
 
+const RECORD_SIZE: usize = size_of::<u128>() + size_of::<u32>() + size_of::<u8>();
+
 impl Message {
-    fn to_record(self) -> [u8; 5] {
+    fn to_record(self) -> [u8; RECORD_SIZE] {
         const TYPE_MASK: u32 = 1 << 31;
-        let (offset, value) = match self {
-            Message::SetByte { offset, value } => {
+        let (time, offset, value) = match self {
+            Message::SetByte {
+                time,
+                offset,
+                value,
+            } => {
                 debug_assert_eq!(offset & TYPE_MASK, 0);
-                (offset, value)
+                (time, offset, value)
             }
-            Message::Toggle { offset } => {
+            Message::Toggle { time, offset } => {
                 debug_assert_eq!(offset & TYPE_MASK, 0);
-                (offset | TYPE_MASK, 0)
+                (time, offset | TYPE_MASK, 0)
             }
         };
-        let mut result = [0; 5];
-        result[..4].copy_from_slice(&offset.to_le_bytes());
-        result[4] = value;
+        let time_diff = time.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let mut result = [0; RECORD_SIZE];
+        result[0..16].copy_from_slice(&time_diff.to_le_bytes());
+        result[16..20].copy_from_slice(&offset.to_le_bytes());
+        result[20] = value;
+        assert_eq!(20, RECORD_SIZE - 1);
         result
     }
 }
 
 pub struct Log {
     tx: std::sync::mpsc::SyncSender<Message>,
+    join_handle: std::thread::JoinHandle<()>,
 }
 
 impl Log {
@@ -47,7 +64,7 @@ impl Log {
             .open(path)?;
 
         let (tx, rx) = std::sync::mpsc::sync_channel(100);
-        std::thread::spawn(move || {
+        let join_handle = std::thread::spawn(move || {
             let mut file = BufWriter::new(file);
             let mut next_flush: Option<Instant> = None;
             loop {
@@ -76,11 +93,16 @@ impl Log {
             }
         });
 
-        Ok(Self { tx })
+        Ok(Self { tx, join_handle })
     }
 
     pub fn log_msg(&self, msg: Message) {
         self.tx.send(msg).unwrap();
+    }
+
+    pub fn finish(self) {
+        drop(self.tx);
+        self.join_handle.join().unwrap();
     }
 }
 
