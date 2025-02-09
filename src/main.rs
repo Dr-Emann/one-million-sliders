@@ -131,6 +131,17 @@ async fn main() {
                 ),
         );
     let state = SharedState::new("bitmap.bin", "log-with-times.bin").unwrap();
+    {
+        let bitmap = state.bitmap.clone();
+        tokio::spawn(async move {
+            let mut sig_hup =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).unwrap();
+            loop {
+                _ = sig_hup.recv().await;
+                bitmap.log.re_open();
+            }
+        });
+    }
     let app = app.with_state(state.clone());
 
     let port: u16 = std::env::args()
@@ -154,7 +165,7 @@ async fn main() {
     }
 
     tracing::info!("server shut down, flushing log");
-    state.bitmap.flush().await;
+    state.bitmap.log.flush().await;
     tracing::info!("exiting");
 }
 

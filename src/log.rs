@@ -20,6 +20,7 @@ pub enum Record {
 enum Message {
     Record(Record),
     Flush(tokio::sync::oneshot::Sender<()>),
+    ReOpen,
 }
 
 const RECORD_SIZE: usize = size_of::<u128>() + size_of::<u32>() + size_of::<u8>();
@@ -69,6 +70,7 @@ impl Log {
             .open(path)?;
 
         let (tx, rx) = std::sync::mpsc::sync_channel(100);
+        let path = path.to_path_buf();
         std::thread::spawn(move || {
             let mut file = BufWriter::new(file);
             let mut next_flush: Option<Instant> = None;
@@ -95,6 +97,19 @@ impl Log {
                         _ = tx.send(());
                         next_flush = None;
                     }
+                    Some(Message::ReOpen) => {
+                        _ = file.flush();
+                        file = BufWriter::new(
+                            std::fs::OpenOptions::new()
+                                .write(true)
+                                .create(true)
+                                .truncate(false)
+                                .append(true)
+                                .open(&path)
+                                .unwrap(),
+                        );
+                        next_flush = None;
+                    }
                     None => {
                         _ = file.flush();
                         next_flush = None;
@@ -108,6 +123,10 @@ impl Log {
 
     pub fn log_msg(&self, msg: Record) {
         self.tx.send(Message::Record(msg)).unwrap();
+    }
+
+    pub fn re_open(&self) {
+        self.tx.send(Message::ReOpen).unwrap();
     }
 
     pub async fn flush(&self) {

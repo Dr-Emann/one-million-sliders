@@ -114,7 +114,7 @@ pub struct SharedBitmap {
     map: MmapRaw,
     bits_set: AtomicU64,
     bytes_sum: AtomicU64,
-    log: Log,
+    pub log: Log,
 }
 
 impl SharedBitmap {
@@ -240,10 +240,6 @@ impl SharedBitmap {
 
     pub fn sum(&self) -> u64 {
         self.bytes_sum.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    pub async fn flush(&self) {
-        self.log.flush().await;
     }
 }
 

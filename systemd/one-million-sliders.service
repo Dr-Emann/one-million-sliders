@@ -7,6 +7,7 @@ Type=simple
 Restart=always
 RestartSec=1
 ExecStart=/usr/local/bin/one-million-sliders
+ExecReload=/bin/kill -HUP $MAINPID
 Environment=RUST_LOG=info
 LimitNOFILE=200000
 WorkingDirectory=/opt/one-million-sliders
