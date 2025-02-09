@@ -2,6 +2,7 @@ use std::convert::Infallible;
 use std::future::IntoFuture;
 use std::io;
 use std::net::Ipv6Addr;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use futures::{stream, Stream};
 use listenfd::ListenFd;
 use std::path::Path as FsPath;
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tokio::time::MissedTickBehavior;
 use tokio_stream::StreamExt;
 use tower::ServiceBuilder;
@@ -36,9 +38,35 @@ mod shared_bitmap;
 const NUM_SLIDERS: usize = 1_000_000;
 const NUM_CHECKBOXES: usize = NUM_SLIDERS * 8;
 
+#[derive(Debug, Default)]
+struct Shutdown {
+    should_shutdown: AtomicBool,
+    notify: Notify,
+}
+
+impl Shutdown {
+    async fn when_owned(self: Arc<Self>) {
+        self.when().await;
+    }
+
+    async fn when(&self) {
+        loop {
+            let notified = self.notify.notified();
+            if self
+                .should_shutdown
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                break;
+            }
+            notified.await;
+        }
+    }
+}
+
 #[derive(Clone)]
 struct SharedState {
     bitmap: Arc<SharedBitmap>,
+    shutdown: Arc<Shutdown>,
     _tasks: Arc<SharedBitmapRunningTasks>,
 }
 
@@ -51,8 +79,26 @@ impl SharedState {
         let bitmap = Arc::new(SharedBitmap::load_or_create(bitmap_path, log_path)?);
         let tasks = Arc::new(bitmap.spawn_tasks());
 
+        let shutdown = Arc::new(Shutdown::default());
+        let shutdown_clone = Arc::clone(&shutdown);
+        tokio::spawn(async move {
+            let ctrl_c = tokio::signal::ctrl_c();
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+
+            tokio::select! {
+                _ = ctrl_c => {},
+                _ = sigterm.recv() => {},
+            }
+            shutdown_clone
+                .should_shutdown
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            shutdown_clone.notify.notify_waiters();
+        });
+
         Ok(Self {
             bitmap,
+            shutdown,
             _tasks: tasks,
         })
     }
@@ -93,28 +139,23 @@ async fn main() {
         .unwrap_or(8000);
     let listener = listener_socket(port).await.unwrap();
 
+    let mut service = std::pin::pin!(axum::serve(listener, app)
+        .with_graceful_shutdown(state.shutdown.clone().when_owned())
+        .into_future());
     tokio::select! {
-        res = axum::serve(listener, app).into_future() => {
+        res = &mut service => {
             res.unwrap();
         },
-        _ = shutdown_fut() => {
-        }
+        _ = state.shutdown.when() => {}
+    }
+    let shutdown_res = tokio::time::timeout(Duration::from_secs(5), service).await;
+    if let Err(e) = shutdown_res {
+        tracing::error!("Timed out shutting down: {:?}", e);
     }
 
     tracing::info!("server shut down, flushing log");
-    Arc::into_inner(state.bitmap).unwrap().finish();
+    state.bitmap.flush().await;
     tracing::info!("exiting");
-}
-
-async fn shutdown_fut() {
-    let ctrl_c = tokio::signal::ctrl_c();
-    let mut sigterm =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
-
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = sigterm.recv() => {},
-    }
 }
 
 async fn listener_socket(port: u16) -> io::Result<TcpListener> {
@@ -240,11 +281,14 @@ async fn range_updates(
         }
     }
     let log_on_disconnect = LogOnDisconnect(span.clone());
+    let SharedState {
+        bitmap, shutdown, ..
+    } = state;
     let count_stream =
         tokio_stream::wrappers::IntervalStream::new(interval).filter_map(move |_tick| {
             // Move the logger into the closure to ensure it's dropped when the stream ends
             let _log_on_disconnect = &log_on_disconnect;
-            let sum = state.bitmap.sum();
+            let sum = bitmap.sum();
             if sum != last_sum {
                 debug!(parent: &span, sum, last_sum, "going to send a sum update");
                 last_sum = sum;
@@ -256,6 +300,7 @@ async fn range_updates(
         });
 
     let stream = stream::select(count_stream, stream);
+    let stream = futures::stream::StreamExt::take_until(stream, shutdown.when_owned());
     let stream = stream.map(Ok);
 
     Ok(Sse::new(stream).keep_alive(sse::KeepAlive::new()))

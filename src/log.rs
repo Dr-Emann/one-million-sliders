@@ -5,7 +5,7 @@ use std::{
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum Message {
+pub enum Record {
     SetByte {
         time: SystemTime,
         offset: u32,
@@ -17,13 +17,18 @@ pub enum Message {
     },
 }
 
+enum Message {
+    Record(Record),
+    Flush(tokio::sync::oneshot::Sender<()>),
+}
+
 const RECORD_SIZE: usize = size_of::<u128>() + size_of::<u32>() + size_of::<u8>();
 
-impl Message {
+impl Record {
     fn to_record(self) -> [u8; RECORD_SIZE] {
         const TYPE_MASK: u32 = 1 << 31;
         let (time, offset, value) = match self {
-            Message::SetByte {
+            Record::SetByte {
                 time,
                 offset,
                 value,
@@ -31,7 +36,7 @@ impl Message {
                 debug_assert_eq!(offset & TYPE_MASK, 0);
                 (time, offset, value)
             }
-            Message::Toggle { time, offset } => {
+            Record::Toggle { time, offset } => {
                 debug_assert_eq!(offset & TYPE_MASK, 0);
                 (time, offset | TYPE_MASK, 0)
             }
@@ -48,7 +53,6 @@ impl Message {
 
 pub struct Log {
     tx: std::sync::mpsc::SyncSender<Message>,
-    join_handle: std::thread::JoinHandle<()>,
 }
 
 impl Log {
@@ -64,7 +68,7 @@ impl Log {
             .open(path)?;
 
         let (tx, rx) = std::sync::mpsc::sync_channel(100);
-        let join_handle = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             let mut file = BufWriter::new(file);
             let mut next_flush: Option<Instant> = None;
             loop {
@@ -81,9 +85,14 @@ impl Log {
                     }
                 };
                 match msg {
-                    Some(msg) => {
+                    Some(Message::Record(msg)) => {
                         _ = handle(&mut file, msg);
                         next_flush = Some(Instant::now() + Duration::from_secs(1));
+                    }
+                    Some(Message::Flush(tx)) => {
+                        _ = file.flush();
+                        _ = tx.send(());
+                        next_flush = None;
                     }
                     None => {
                         _ = file.flush();
@@ -93,20 +102,21 @@ impl Log {
             }
         });
 
-        Ok(Self { tx, join_handle })
+        Ok(Self { tx })
     }
 
-    pub fn log_msg(&self, msg: Message) {
-        self.tx.send(msg).unwrap();
+    pub fn log_msg(&self, msg: Record) {
+        self.tx.send(Message::Record(msg)).unwrap();
     }
 
-    pub fn finish(self) {
-        drop(self.tx);
-        self.join_handle.join().unwrap();
+    pub async fn flush(&self) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.tx.send(Message::Flush(tx)).unwrap();
+        rx.await.unwrap();
     }
 }
 
-fn handle<W: io::Write>(mut file: W, msg: Message) -> io::Result<()> {
+fn handle<W: io::Write>(mut file: W, msg: Record) -> io::Result<()> {
     let record = msg.to_record();
     file.write_all(&record)
 }

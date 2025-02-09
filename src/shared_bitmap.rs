@@ -200,7 +200,7 @@ impl SharedBitmap {
 
         let prev = chunk.set_byte(inner_idx, byte);
         notify.notify_one();
-        self.log.log_msg(log::Message::SetByte {
+        self.log.log_msg(log::Record::SetByte {
             time: SystemTime::now(),
             offset: index as u32,
             value: byte,
@@ -220,7 +220,7 @@ impl SharedBitmap {
         let (chunk, notify) = self.chunk_notify(bit_index / CHUNK_BITS);
         let prev_bit = chunk.toggle((bit_index % CHUNK_BITS) as u16);
         notify.notify_one();
-        self.log.log_msg(log::Message::Toggle {
+        self.log.log_msg(log::Record::Toggle {
             time: SystemTime::now(),
             offset: bit_index as u32,
         });
@@ -233,6 +233,7 @@ impl SharedBitmap {
         self.segments[segment_index].watch.subscribe()
     }
 
+    #[allow(dead_code)]
     pub fn count(&self) -> u64 {
         self.bits_set.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -241,8 +242,8 @@ impl SharedBitmap {
         self.bytes_sum.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    pub fn finish(self) {
-        self.log.finish();
+    pub async fn flush(&self) {
+        self.log.flush().await;
     }
 }
 
