@@ -65,6 +65,7 @@ impl Log {
             .write(true)
             .create(true)
             .truncate(false)
+            .append(true)
             .open(path)?;
 
         let (tx, rx) = std::sync::mpsc::sync_channel(100);
