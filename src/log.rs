@@ -94,6 +94,7 @@ impl Log {
                     }
                     Some(Message::Flush(tx)) => {
                         _ = file.flush();
+                        tracing::info!("log flushed explicitly");
                         _ = tx.send(());
                         next_flush = None;
                     }
@@ -108,10 +109,12 @@ impl Log {
                                 .open(&path)
                                 .unwrap(),
                         );
+                        tracing::info!("file re-opened");
                         next_flush = None;
                     }
                     None => {
                         _ = file.flush();
+                        tracing::info!("log flushed automatically");
                         next_flush = None;
                     }
                 }
