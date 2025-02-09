@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
+use axum::http::header;
 use axum::http::StatusCode;
 use axum::response::{sse, Sse};
 use axum::routing::{get, post};
@@ -14,7 +15,9 @@ use axum::{Json, Router};
 use base64::prelude::BASE64_STANDARD_NO_PAD;
 use base64::Engine;
 use futures::{stream, Stream};
+use image::GrayImage;
 use listenfd::ListenFd;
+use shared_bitmap::Chunk;
 use std::path::Path as FsPath;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
@@ -116,6 +119,7 @@ async fn main() {
         .route("/updates", get(range_updates))
         .route("/toggle/:idx", post(toggle))
         .route("/set_byte/:idx/:value", post(set_byte))
+        .route("/image.png", get(state_img))
         .nest_service("/", ServeDir::new("www"))
         .layer(
             ServiceBuilder::new()
@@ -339,4 +343,32 @@ async fn set_byte(
     }
     state.bitmap.set_byte(idx as usize, value);
     Ok(())
+}
+
+#[tracing::instrument(skip(state))]
+#[axum::debug_handler]
+async fn state_img(State(state): State<SharedState>) -> impl axum::response::IntoResponse {
+    let mut img_raw = vec![0u8; NUM_SLIDERS.next_multiple_of(CHUNK_BYTES)];
+
+    Chunk::load_chunks(state.bitmap.raw_chunks(), &mut img_raw);
+    img_raw.truncate(NUM_SLIDERS);
+
+    let img_raw = tokio::task::spawn_blocking(move || {
+        let mut dst = Vec::new();
+        let img = GrayImage::from_vec(1000, 1000, img_raw).unwrap();
+        img.write_to(&mut std::io::Cursor::new(&mut dst), image::ImageFormat::Png)
+            .unwrap();
+        dst
+    })
+    .await
+    .unwrap();
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=5"),
+        ],
+        img_raw,
+    )
 }

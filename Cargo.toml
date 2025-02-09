@@ -28,6 +28,7 @@ tower-http = { version = "0.5.2", features = [
     "compression-br",
     "trace",
 ] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [profile.release]
 opt-level = 3     # Maximum optimization
