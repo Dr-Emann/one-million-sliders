@@ -396,7 +396,17 @@ async fn handle_socket<'a>(
     socket: &'a mut WebSocket,
     state: SharedState,
 ) -> Result<(), Option<ws::CloseFrame<'static>>> {
-    while let Some(msg) = socket.recv().await {
+    loop {
+        let msg = tokio::select! {
+            msg = socket.recv() => msg,
+            _ = state.shutdown.when() => {
+                return Err(Some(ws::CloseFrame {
+                    code: ws::close_code::RESTART,
+                    reason: Cow::Borrowed("Server is shutting down"),
+                }));
+            }
+        };
+        let Some(msg) = msg else { return Ok(()) };
         let msg = match msg {
             Ok(msg) => msg,
             Err(_) => {
@@ -408,7 +418,6 @@ async fn handle_socket<'a>(
             process_binary_message(&data, &state).map_err(Some)?;
         }
     }
-    Ok(())
 }
 
 fn process_binary_message(data: &[u8], state: &SharedState) -> Result<(), ws::CloseFrame<'static>> {
