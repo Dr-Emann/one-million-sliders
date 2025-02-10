@@ -107,3 +107,55 @@ POST /set_byte/100/255
 ```http
 GET /image.png
 ```
+
+### 5. WebSocket Batch Updates
+
+**Endpoint:** `GET /ws`
+
+**Description:** Opens a WebSocket connection for sending batch updates to multiple sliders efficiently.
+
+**Message Types:**
+
+1. Individual Updates (0x00)
+   - First byte: 0x00
+   - Subsequent bytes: List of operations (max 100), where each operation is 5 bytes:
+     - Bytes 1-4: Slider index (32-bit little-endian unsigned integer)
+     - Byte 5: Value to set (0-255)
+
+   **Example:**
+   ```hex
+   00 05000000 FF 0A000000 7B
+   ```
+   This message:
+   - Uses message type 0x00
+   - Sets slider #5 to 255
+   - Sets slider #10 to 123
+
+2. Block Update (0x01)
+   - First byte: 0x01
+   - Bytes 2-5: Starting index (32-bit little-endian unsigned integer)
+   - Subsequent bytes: Values to set (max 100 bytes)
+
+   **Example:**
+   ```hex
+   01 05000000 FF 7B 32
+   ```
+   This message:
+   - Uses message type 0x01
+   - Sets slider #5 to 255
+   - Sets slider #6 to 123
+   - Sets slider #7 to 50
+
+Note: All multi-byte integers are encoded in little-endian format.
+
+**Limitations:**
+- Maximum 100 operations per message for type 0x00
+- Maximum 100 values per message for type 0x01
+- Slider indices must be within range (0 to 999,999)
+
+**Error Handling:**
+- The WebSocket connection will be closed with an appropriate error message if:
+  - Message type is invalid
+  - Message format is invalid
+  - Operation/value limit is exceeded
+  - Any slider index is out of range

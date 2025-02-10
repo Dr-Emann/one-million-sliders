@@ -9,6 +9,7 @@ axum = { version = "0.7", features = [
     "macros",
     "tracing",
     "tower-log",
+    "ws",
 ] }
 base64 = "0.22.1"
 memmap2 = "0.9.4"

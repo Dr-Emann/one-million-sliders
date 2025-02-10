@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::convert::Infallible;
 use std::future::IntoFuture;
 use std::io;
@@ -6,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::ws::{self, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::header;
 use axum::http::StatusCode;
@@ -120,6 +122,7 @@ async fn main() {
         .route("/toggle/:idx", post(toggle))
         .route("/set_byte/:idx/:value", post(set_byte))
         .route("/image.png", get(state_img))
+        .route("/ws", get(ws_handler))
         .nest_service("/", ServeDir::new("www"))
         .layer(
             ServiceBuilder::new()
@@ -371,4 +374,114 @@ async fn state_img(State(state): State<SharedState>) -> impl axum::response::Int
         ],
         img_raw,
     )
+}
+
+async fn ws_handler(
+    State(state): State<SharedState>,
+    ws: WebSocketUpgrade,
+) -> impl axum::response::IntoResponse {
+    ws.max_message_size(1 + 100 * 5)
+        .on_upgrade(|socket| async move {
+            let mut socket = socket;
+            if let Err(close_frame) = handle_socket(&mut socket, state).await {
+                _ = socket.send(ws::Message::Close(close_frame)).await;
+            }
+            _ = socket.close().await;
+        })
+}
+
+async fn handle_socket<'a>(
+    socket: &'a mut WebSocket,
+    state: SharedState,
+) -> Result<(), Option<ws::CloseFrame<'static>>> {
+    while let Some(msg) = socket.recv().await {
+        let msg = match msg {
+            Ok(msg) => msg,
+            Err(_) => {
+                return Err(None);
+            }
+        };
+
+        if let ws::Message::Binary(data) = msg {
+            process_binary_message(&data, &state).map_err(Some)?;
+        }
+    }
+    Ok(())
+}
+
+fn process_binary_message(data: &[u8], state: &SharedState) -> Result<(), ws::CloseFrame<'static>> {
+    let Some((kind, data)) = data.split_first() else {
+        return Err(ws::CloseFrame {
+            code: ws::close_code::UNSUPPORTED,
+            reason: Cow::Borrowed("Message is empty"),
+        });
+    };
+    let res = match kind {
+        0x00 => process_individual_updates(data, state),
+        0x01 => process_block_update(data, state),
+        _ => Err(Cow::Borrowed("Unknown message type")),
+    };
+    if let Err(msg) = res {
+        return Err(ws::CloseFrame {
+            code: ws::close_code::UNSUPPORTED,
+            reason: msg,
+        });
+    }
+    Ok(())
+}
+
+fn process_individual_updates(
+    operations: &[u8],
+    state: &SharedState,
+) -> Result<(), Cow<'static, str>> {
+    if operations.len() % 5 != 0 {
+        return Err("Invalid operation format".into());
+    }
+
+    let chunks = operations.chunks_exact(5);
+    if chunks.len() > 100 {
+        return Err("Too many operations (max 100)".into());
+    }
+
+    for chunk in chunks {
+        let (idx, rest) = chunk.split_first_chunk().unwrap();
+        let &[value] = rest.try_into().unwrap();
+        let idx = u32::from_le_bytes(*idx) as usize;
+
+        if idx >= NUM_SLIDERS {
+            return Err(format!("Slider index out of range: {}", idx).into());
+        }
+
+        tracing::debug!("Setting byte {idx} to {value}");
+
+        state.bitmap.set_byte(idx, value);
+    }
+
+    Ok(())
+}
+
+fn process_block_update(data: &[u8], state: &SharedState) -> Result<(), Cow<'static, str>> {
+    let Some((start_idx, values)) = data.split_first_chunk() else {
+        return Err("Message too short".into());
+    };
+    let start_idx = u32::from_le_bytes(*start_idx) as usize;
+
+    if values.len() > 100 {
+        return Err("Too many values (max 100)".into());
+    }
+    if start_idx + values.len() > NUM_SLIDERS {
+        return Err(format!(
+            "Range out of bounds: {} + {} > {}",
+            start_idx,
+            values.len(),
+            NUM_SLIDERS
+        )
+        .into());
+    }
+
+    for (offset, &value) in values.iter().enumerate() {
+        state.bitmap.set_byte(start_idx + offset, value);
+    }
+
+    Ok(())
 }
