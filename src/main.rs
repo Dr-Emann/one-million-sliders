@@ -376,11 +376,13 @@ async fn state_img(State(state): State<SharedState>) -> impl axum::response::Int
     )
 }
 
+const MAX_BATCH_SIZE: usize = 1;
+
 async fn ws_handler(
     State(state): State<SharedState>,
     ws: WebSocketUpgrade,
 ) -> impl axum::response::IntoResponse {
-    ws.max_message_size(1 + 100 * 5)
+    ws.max_message_size(1 + MAX_BATCH_SIZE * 5)
         .on_upgrade(|socket| async move {
             let mut socket = socket;
             if let Err(close_frame) = handle_socket(&mut socket, state).await {
@@ -439,8 +441,8 @@ fn process_individual_updates(
     }
 
     let chunks = operations.chunks_exact(5);
-    if chunks.len() > 100 {
-        return Err("Too many operations (max 100)".into());
+    if chunks.len() > MAX_BATCH_SIZE {
+        return Err("Too many operations".into());
     }
 
     for chunk in chunks {
@@ -466,7 +468,7 @@ fn process_block_update(data: &[u8], state: &SharedState) -> Result<(), Cow<'sta
     };
     let start_idx = u32::from_le_bytes(*start_idx) as usize;
 
-    if values.len() > 100 {
+    if values.len() > MAX_BATCH_SIZE {
         return Err("Too many values (max 100)".into());
     }
     if start_idx + values.len() > NUM_SLIDERS {

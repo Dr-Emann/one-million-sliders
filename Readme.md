@@ -118,39 +118,36 @@ GET /image.png
 
 1. Individual Updates (0x00)
    - First byte: 0x00
-   - Subsequent bytes: List of operations (max 100), where each operation is 5 bytes:
+   - Subsequent bytes: List of operations (max 1), where each operation is 5 bytes:
      - Bytes 1-4: Slider index (32-bit little-endian unsigned integer)
      - Byte 5: Value to set (0-255)
 
    **Example:**
    ```hex
-   00 05000000 FF 0A000000 7B
+   00 05 000000
    ```
    This message:
    - Uses message type 0x00
    - Sets slider #5 to 255
-   - Sets slider #10 to 123
 
 2. Block Update (0x01)
    - First byte: 0x01
    - Bytes 2-5: Starting index (32-bit little-endian unsigned integer)
-   - Subsequent bytes: Values to set (max 100 bytes)
+   - Subsequent bytes: Values to set (max 1 byte)
 
    **Example:**
    ```hex
-   01 05000000 FF 7B 32
+   01 05 000000 FF
    ```
    This message:
    - Uses message type 0x01
    - Sets slider #5 to 255
-   - Sets slider #6 to 123
-   - Sets slider #7 to 50
 
 Note: All multi-byte integers are encoded in little-endian format.
 
 **Limitations:**
-- Maximum 100 operations per message for type 0x00
-- Maximum 100 values per message for type 0x01
+- Maximum 1 operations per message for type 0x00
+- Maximum 1 values per message for type 0x01
 - Slider indices must be within range (0 to 999,999)
 
 **Error Handling:**
