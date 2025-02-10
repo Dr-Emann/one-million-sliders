@@ -93,3 +93,17 @@ POST /set_byte/100/255
 ```http
 200 OK
 ```
+
+### 4. Get State Image
+
+**Endpoint:** `GET /image.png`
+
+**Description:** Returns a 1000x1000 grayscale PNG image representation of all slider values. Each pixel's brightness corresponds to a slider value (0-255).
+
+**Response:**
+- `200 OK`: Returns a PNG image
+
+**Example Request:**
+```http
+GET /image.png
+```
