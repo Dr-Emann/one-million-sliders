@@ -390,8 +390,12 @@ async fn state_gif(State(shared_state): State<SharedState>) -> impl axum::respon
     (
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, "image/gif"),
-            (header::CACHE_CONTROL, "no-cache, no-store, no-transform"),
+            (header::CONTENT_TYPE.as_str(), "image/gif"),
+            (
+                header::CACHE_CONTROL.as_str(),
+                "no-cache, no-store, no-transform",
+            ),
+            ("content-transfer-encoding", "binary"),
         ],
         axum::body::Body::from_stream(
             futures::StreamExt::take_until(
