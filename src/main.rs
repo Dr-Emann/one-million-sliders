@@ -17,6 +17,7 @@ use axum::{Json, Router};
 use base64::prelude::BASE64_STANDARD_NO_PAD;
 use base64::Engine;
 use futures::{stream, Stream};
+use gif::GifFrames;
 use image::GrayImage;
 use listenfd::ListenFd;
 use shared_bitmap::Chunk;
@@ -36,6 +37,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::shared_bitmap::{SharedBitmap, SharedBitmapRunningTasks, CHUNK_BITS, CHUNK_BYTES};
 
+mod gif;
 mod log;
 mod shared_bitmap;
 
@@ -72,6 +74,7 @@ impl Shutdown {
 struct SharedState {
     bitmap: Arc<SharedBitmap>,
     shutdown: Arc<Shutdown>,
+    gif_frames: GifFrames,
     _tasks: Arc<SharedBitmapRunningTasks>,
 }
 
@@ -82,7 +85,10 @@ impl SharedState {
 
     fn _new(bitmap_path: &FsPath, log_path: &FsPath) -> io::Result<Self> {
         let bitmap = Arc::new(SharedBitmap::load_or_create(bitmap_path, log_path)?);
-        let tasks = Arc::new(bitmap.spawn_tasks());
+        let mut tasks = bitmap.spawn_tasks();
+
+        let gif_frames = GifFrames::new(Arc::clone(&bitmap));
+        tasks.add(tokio::spawn(gif_frames.clone().produce_frames()));
 
         let shutdown = Arc::new(Shutdown::default());
         let shutdown_clone = Arc::clone(&shutdown);
@@ -104,7 +110,8 @@ impl SharedState {
         Ok(Self {
             bitmap,
             shutdown,
-            _tasks: tasks,
+            gif_frames,
+            _tasks: Arc::new(tasks),
         })
     }
 }
@@ -122,6 +129,7 @@ async fn main() {
         .route("/toggle/:idx", post(toggle))
         .route("/set_byte/:idx/:value", post(set_byte))
         .route("/image.png", get(state_img))
+        .route("/image.gif", get(state_gif))
         .route("/ws", get(ws_handler))
         .nest_service("/", ServeDir::new("www"))
         .layer(
@@ -373,6 +381,25 @@ async fn state_img(State(state): State<SharedState>) -> impl axum::response::Int
             (header::CACHE_CONTROL, "public, max-age=5"),
         ],
         img_raw,
+    )
+}
+
+#[tracing::instrument(skip(shared_state))]
+#[axum::debug_handler]
+async fn state_gif(State(shared_state): State<SharedState>) -> impl axum::response::IntoResponse {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "image/gif"),
+            (header::CACHE_CONTROL, "no-cache, no-store, no-transform"),
+        ],
+        axum::body::Body::from_stream(
+            futures::StreamExt::take_until(
+                shared_state.gif_frames.byte_stream(),
+                shared_state.shutdown.when_owned(),
+            )
+            .map(Ok::<_, Infallible>),
+        ),
     )
 }
 

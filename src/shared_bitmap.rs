@@ -15,9 +15,9 @@ use crate::log::{self, Log};
 
 pub const CHUNK_BYTES: usize = 128;
 pub const CHUNK_BITS: usize = CHUNK_BYTES * 8;
+pub const NUM_CHUNKS: usize = TOTAL_BITS.div_ceil(CHUNK_BITS);
 
 const TOTAL_BITS: usize = crate::NUM_CHECKBOXES;
-const NUM_CHUNKS: usize = TOTAL_BITS.div_ceil(CHUNK_BITS);
 
 #[repr(transparent)]
 pub struct Chunk([AtomicU8; CHUNK_BYTES]);
@@ -49,7 +49,8 @@ impl Chunk {
         Self::load_chunks(std::array::from_ref(self), dst);
     }
 
-    pub fn load_chunks(chunks: &[Chunk], dst: &mut [u8]) {
+    // Returns if any values were different than previously in dst
+    pub fn load_chunks(chunks: &[Chunk], dst: &mut [u8]) -> bool {
         assert_eq!(dst.len(), chunks.len() * CHUNK_BYTES);
 
         let chunks_bytes = unsafe {
@@ -62,19 +63,26 @@ impl Chunk {
         let (prefix_dst, rest) = dst.split_at_mut(prefix.len());
         let (aligned_dst, suffix_dxt) = rest.split_at_mut(aligned.len() * size_of::<usize>());
 
+        let mut changed = false;
         for (d, s) in prefix_dst.iter_mut().zip(prefix.iter()) {
-            *d = s.load(std::sync::atomic::Ordering::Relaxed);
+            let s = s.load(std::sync::atomic::Ordering::Relaxed);
+            changed |= *d != s;
+            *d = s;
         }
         for (d, s) in aligned_dst
             .chunks_exact_mut(size_of::<usize>())
             .zip(aligned)
         {
             let s = s.load(std::sync::atomic::Ordering::Relaxed);
+            changed |= !s.to_ne_bytes().iter().eq(d.iter());
             d.copy_from_slice(&s.to_ne_bytes());
         }
         for (d, s) in suffix_dxt.iter_mut().zip(suffix.iter()) {
-            *d = s.load(std::sync::atomic::Ordering::Relaxed);
+            let s = s.load(std::sync::atomic::Ordering::Relaxed);
+            changed |= *d != s;
+            *d = s;
         }
+        changed
     }
 
     #[inline]
@@ -188,6 +196,10 @@ impl SharedBitmap {
         unsafe { std::slice::from_raw_parts(self.map.as_ptr().cast::<Chunk>(), NUM_CHUNKS) }
     }
 
+    pub fn fill_bytes_mut(&self, bytes: &mut [u8; CHUNK_BYTES * NUM_CHUNKS]) -> bool {
+        Chunk::load_chunks(self.raw_chunks(), bytes)
+    }
+
     fn chunk_notify(&self, index: usize) -> (&Chunk, &Notify) {
         let chunk = &self.raw_chunks()[index];
         let segment = &self.segments[index];
@@ -245,6 +257,12 @@ impl SharedBitmap {
 
 pub struct SharedBitmapRunningTasks {
     tasks: Vec<JoinHandle<Infallible>>,
+}
+
+impl SharedBitmapRunningTasks {
+    pub fn add(&mut self, task: JoinHandle<Infallible>) {
+        self.tasks.push(task);
+    }
 }
 
 impl Drop for SharedBitmapRunningTasks {

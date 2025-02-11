@@ -12,6 +12,7 @@ axum = { version = "0.7", features = [
     "ws",
 ] }
 base64 = "0.22.1"
+bytes = "1.0"
 memmap2 = "0.9.4"
 futures = "0.3.30"
 serde = { version = "1.0", features = ["derive"] }
@@ -30,6 +31,7 @@ tower-http = { version = "0.5.2", features = [
     "trace",
 ] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+gif = "0.13.1"
 
 [profile.release]
 opt-level = 3     # Maximum optimization
