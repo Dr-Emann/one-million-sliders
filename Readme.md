@@ -14,12 +14,17 @@ The base URL for the API is: `https://onemillionsliders.com`
 
 **Description:** Retrieves a snapshot of the slider states within a specified range.
 
+**NOTE**: The range is described in number of _bits_ for legacy reasons. To request a range from the first slider to the 100th slider,
+would request with `start=0` and `end=800`. (both start and end should be 8 times the slider index)
+
 **Query Parameters:**
-- `start` (u64): The starting index of the range. This value will be rounded down to the nearest multiple of 1024.
-- `end` (u64): The ending index of the range. This value will be rounded up to the nearest multiple of 1024.
+- `start` (u64): The starting bit of the range. This value will be rounded down to the nearest multiple of 1024 (32 sliders).
+- `end` (u64): The ending bit of the range. This value will be rounded up to the nearest multiple of 1024 (32 sliders).
 
 **Response:**
 - `200 OK`: Returns a JSON object containing the start index and the base64-encoded bits representing the slider states.
+  Note that the actual start bit is indicated by the `start` field in the response.
+  - e.g. If the `start` field is 1024, the first byte of the `bits` field (after base64 decoding) corresponds to the value of the 129th slider.
 - `400 Bad Request`: If the range is invalid.
 
 **Example Request:**
@@ -41,11 +46,14 @@ Note that this will return bits from index 0 to 1023.
 
 **Endpoint:** `GET /updates`
 
-**Description:** Subscribes to updates for the slider states within a specified range.
+**Description:** Subscribes via Server Sent Events to updates for the slider states within a specified range.
+
+**NOTE**: The range is described in number of _bits_ for legacy reasons. To request a range from the first slider to the 100th slider,
+would request with `start=0` and `end=800`. (both start and end should be 8 times the slider index)
 
 **Query Parameters:**
-- `start` (u64): The starting index of the range. This value will be rounded down to the nearest multiple of 1024.
-- `end` (u64): The ending index of the range. This value will be rounded up to the nearest multiple of 1024.
+- `start` (u64): The starting bit of the range. This value will be rounded down to the nearest multiple of 1024 (32 sliders).
+- `end` (u64): The ending bit of the range. This value will be rounded up to the nearest multiple of 1024 (32 sliders).
 
 **Response:**
 - `200 OK`: Returns an SSE (Server-Sent Events) stream of updates.
@@ -57,7 +65,10 @@ GET /updates?start=0&end=100
 ```
 
 **Server-Sent Event Types:**
-- `update`: Sent when a chunk of slider states within the specified range is updated. The `data` field contains the base64-encoded bits representing the updated slider states. The `id` field represents the chunk index the update is for (chunks are 1024 bits).
+- `update`: Sent when a chunk of slider states within the specified range is updated.
+  The `data` field contains the base64-encoded bits representing the updated slider states.
+  The `id` field represents the offset **in bits** of the first bit of the data.
+  - e.g. If the `id` field is 1024, the first byte of the `data` field (after base64 decoding) corresponds to the value of the 129th slider.
 - `sum`: Sent periodically with the sum of all slider values. The `data` field contains the sum.
 
 **Example Response:**
