@@ -119,8 +119,8 @@ GET /image.png
 1. Individual Updates (0x00)
    - First byte: 0x00
    - Subsequent bytes: List of operations (max 1), where each operation is 5 bytes:
-     - Bytes 1-4: Slider index (32-bit little-endian unsigned integer)
-     - Byte 5: Value to set (0-255)
+     - Bytes 2-5: Slider index (32-bit little-endian unsigned integer)
+     - Byte 6: Value to set (0-255)
 
    **Example:**
    ```hex
